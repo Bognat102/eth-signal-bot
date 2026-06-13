@@ -1,0 +1,4 @@
+ccxt
+pandas
+pyTelegramBotAPI
+python-dotenv
