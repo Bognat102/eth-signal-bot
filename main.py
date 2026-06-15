@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 from datetime import datetime
 
 import ccxt
@@ -9,6 +11,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID"))
+
 bot = telebot.TeleBot(TOKEN)
 
 exchange = ccxt.binance()
@@ -50,7 +54,7 @@ def save_signal(signal, price, rsi, mode):
     row = {
         "time": now,
         "symbol": "ETHUSDT",
-        "mode": mode,
+    
         "signal": signal,
         "price": price,
         "rsi": rsi
@@ -172,7 +176,7 @@ ATR: {atr}
 def start(message):
     bot.reply_to(
         message,
-        "Привет! Бот работает.\n\nКоманды:\n/price\n/strong_signal\n/stats"
+        "Привет! Бот работает.\n\nКоманды:\n/price\n/strong_signal"
     )
 
 
@@ -244,5 +248,24 @@ EMA200: {round(last15['ema200'],2)}
 """
 
     bot.reply_to(message, text)
+def auto_check():
+    while True:
+        try:
+            result = analyze_strong_signal()
+
+            bot.send_message(CHAT_ID, result)
+
+            print("Автопроверка ETH выполнена", flush=True)
+
+        except Exception as e:
+            print("Ошибка автопроверки:", e)
+
+        time.sleep(900)
+
+
+
+threading.Thread(target=auto_check, daemon=True).start()
+
 print("Бот запущен...")
 bot.infinity_polling()
+# test
