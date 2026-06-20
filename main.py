@@ -100,7 +100,7 @@ def analyze_strong_signal():
         trend_long
         and last_15m["close"] > last_15m["ema200"]
         and last_15m["ema20"] > last_15m["ema50"]
-        and 50 <= rsi <= 65
+        and 50 <= rsi <= 75
         and volume_ok
         and candle_green
     )
@@ -109,7 +109,7 @@ def analyze_strong_signal():
         trend_short
         and last_15m["close"] < last_15m["ema200"]
         and last_15m["ema20"] < last_15m["ema50"]
-        and 35 <= rsi <= 50
+        and 25 <= rsi <= 50
         and volume_ok
         and candle_red
     )
