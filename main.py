@@ -164,8 +164,8 @@ def analyze_strong_signal():
     df_15m = get_data(SYMBOL, "15m", 250)
     df_1h = get_data(SYMBOL, "1h", 250)
 
-    last_15m = df_15m.iloc[-1]
-    last_1h = df_1h.iloc[-1]
+    last_15m = df_15m.iloc[-2]
+    last_1h = df_1h.iloc[-2]
 
     price = round(last_15m["close"], 2)
     rsi = round(last_15m["rsi"], 2)
