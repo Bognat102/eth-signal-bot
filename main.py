@@ -524,6 +524,88 @@ EMA200: {round(safe_float(last15['ema200']), 2)}
 VWAP: {round(safe_float(last15['vwap']), 2)}
 """)
 
+@bot.message_handler(commands=["results"])
+def results(message):
+    update_trade_results()
+
+    if not os.path.exists(TRADES_FILE):
+        bot.reply_to(message, "Результатов пока нет.")
+        return
+
+    df = pd.read_csv(TRADES_FILE)
+    if df.empty:
+        bot.reply_to(message, "Результатов пока нет.")
+        return
+
+    total = len(df)
+    open_count = len(df[df["status"].isin(["OPEN", "TP1_HIT"])]) if "status" in df.columns else 0
+    closed = df[~df["status"].isin(["OPEN", "TP1_HIT"])] if "status" in df.columns else df.iloc[0:0]
+
+    tp2 = len(df[df["status"] == "TP2_HIT"]) if "status" in df.columns else 0
+    stops = len(df[df["status"] == "STOP"]) if "status" in df.columns else 0
+    tp1_only = len(df[df["status"] == "TP1_HIT"]) if "status" in df.columns else 0
+
+    result_sum = 0.0
+    if "result" in df.columns:
+        result_sum = pd.to_numeric(df["result"], errors="coerce").fillna(0).sum()
+
+    win_rate = 0
+    if len(closed) > 0:
+        wins = 0
+        if "result" in closed.columns:
+            wins = (pd.to_numeric(closed["result"], errors="coerce").fillna(0) > 0).sum()
+        win_rate = round((wins / len(closed)) * 100, 1)
+
+    bot.reply_to(message, f"""
+РЕЗУЛЬТАТЫ ETH
+
+Всего сделок: {total}
+Закрытых: {len(closed)}
+Открытых: {open_count}
+
+TP2: {tp2}
+TP1/в работе: {tp1_only}
+Стопов: {stops}
+
+Win Rate закрытых: {win_rate}%
+Общий результат по цене: {round(result_sum, 2)} USDT
+
+Деньги НЕ используем.
+Это paper-статистика.
+""")
+
+
+@bot.message_handler(commands=["history"])
+def history(message):
+    update_trade_results()
+
+    if not os.path.exists(TRADES_FILE):
+        bot.reply_to(message, "Истории сделок пока нет.")
+        return
+
+    df = pd.read_csv(TRADES_FILE)
+    if df.empty:
+        bot.reply_to(message, "Истории сделок пока нет.")
+        return
+
+    lines = []
+    last_rows = df.tail(10)
+
+    for _, row in last_rows.iterrows():
+        time_value = row.get("time", "-")
+        signal = row.get("signal", "-")
+        status = row.get("status", "-")
+        entry = row.get("entry", "-")
+        result = row.get("result", "")
+        alpha = row.get("alpha", row.get("alpha_score", "-"))
+
+        lines.append(
+            f"{time_value} | {signal} | {status} | Entry: {entry} | Result: {result} | Alpha: {alpha}"
+        )
+
+    bot.reply_to(message, "ИСТОРИЯ ПОСЛЕДНИХ СДЕЛОК\n\n" + "\n".join(lines))
+
+
 
 def auto_check():
     while True:
