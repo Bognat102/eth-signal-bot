@@ -148,7 +148,6 @@ def save_trade(signal, price, rsi, atr, adx, alpha, stop, tp1, tp2, reasons):
 def update_trade_results():
     if not os.path.exists(TRADES_FILE):
         return
-
     df = pd.read_csv(TRADES_FILE)
     if df.empty:
         return
@@ -166,58 +165,59 @@ def update_trade_results():
         tp1 = float(row["tp1"])
         tp2 = float(row["tp2"])
         status = row["status"]
-        tp1_hit = str(row.get("tp1_hit", "NO"))
 
         if signal == "LONG":
-
             if current_price >= tp2:
                 df.at[i, "status"] = "TP2_HIT"
                 df.at[i, "tp1_hit"] = "YES"
                 df.at[i, "result"] = round(tp2 - entry, 2)
                 changed = True
-
             elif current_price >= tp1 and status == "OPEN":
                 df.at[i, "status"] = "TP1_HIT"
                 df.at[i, "tp1_hit"] = "YES"
                 df.at[i, "stop"] = entry
                 df.at[i, "result"] = round(tp1 - entry, 2)
                 changed = True
-
             elif current_price <= stop:
-                if tp1_hit == "YES" or status == "TP1_HIT":
-                    df.at[i, "status"] = "TP1_BE"
-                    df.at[i, "result"] = round(tp1 - entry, 2)
-                else:
-                    df.at[i, "status"] = "STOP"
-                    df.at[i, "result"] = round(stop - entry, 2)
+                df.at[i, "status"] = "STOP"
+                df.at[i, "result"] = round(stop - entry, 2)
                 changed = True
 
         elif signal == "SHORT":
-
             if current_price <= tp2:
                 df.at[i, "status"] = "TP2_HIT"
                 df.at[i, "tp1_hit"] = "YES"
                 df.at[i, "result"] = round(entry - tp2, 2)
                 changed = True
-
             elif current_price <= tp1 and status == "OPEN":
                 df.at[i, "status"] = "TP1_HIT"
                 df.at[i, "tp1_hit"] = "YES"
                 df.at[i, "stop"] = entry
                 df.at[i, "result"] = round(entry - tp1, 2)
                 changed = True
-
             elif current_price >= stop:
-                if tp1_hit == "YES" or status == "TP1_HIT":
-                    df.at[i, "status"] = "TP1_BE"
-                    df.at[i, "result"] = round(entry - tp1, 2)
-                else:
-                    df.at[i, "status"] = "STOP"
-                    df.at[i, "result"] = round(entry - stop, 2)
+                df.at[i, "status"] = "STOP"
+                df.at[i, "result"] = round(entry - stop, 2)
                 changed = True
 
     if changed:
         df.to_csv(TRADES_FILE, index=False)
+
+
+def detect_candidate(last_15m, last_1h):
+    trend_long = last_1h["close"] > last_1h["ema50"] and last_1h["ema20"] > last_1h["ema50"]
+    trend_short = last_1h["close"] < last_1h["ema50"] and last_1h["ema20"] < last_1h["ema50"]
+
+    local_long = last_15m["close"] > last_15m["ema50"] and last_15m["ema20"] > last_15m["ema50"]
+    local_short = last_15m["close"] < last_15m["ema50"] and last_15m["ema20"] < last_15m["ema50"]
+
+    rsi = safe_float(last_15m["rsi"])
+
+    if trend_long and local_long and 45 <= rsi <= 75:
+        return "LONG"
+    if trend_short and local_short and 25 <= rsi <= 55:
+        return "SHORT"
+    return "NONE"
 
 
 def btc_confirmation(candidate):
@@ -605,112 +605,7 @@ def history(message):
 
     bot.reply_to(message, "ИСТОРИЯ ПОСЛЕДНИХ СДЕЛОК\n\n" + "\n".join(lines))
 
-@bot.message_handler(commands=["skip_audit"])
-def skip_audit(message):
-    if not os.path.exists(DECISIONS_FILE):
-        bot.reply_to(message, "Аудита пока нет.")
-        return
 
-    df = pd.read_csv(DECISIONS_FILE)
-    if df.empty:
-        bot.reply_to(message, "Аудита пока нет.")
-        return
-
-    total = len(df)
-    opened = len(df[df["action"] == "OPEN"])
-    skipped = len(df[df["action"] == "SKIP"])
-
-    none_count = len(df[df["candidate"] == "NONE"])
-    long_count = len(df[df["candidate"] == "LONG"])
-    short_count = len(df[df["candidate"] == "SHORT"])
-
-    low_alpha = len(df[(df["action"] == "SKIP") & (df["alpha"] < ALPHA_THRESHOLD)])
-
-    reasons_text = " | ".join(df["reasons"].astype(str).tolist())
-
-    open_trade_blocks = reasons_text.count("Уже есть открытая сделка")
-    daily_limit_blocks = reasons_text.count("Дневной лимит сделок")
-    no_direction_blocks = reasons_text.count("Нет базового направления")
-    btc_against = reasons_text.count("BTC против направления")
-    late_entries = reasons_text.count("Слишком поздний вход")
-    sharp_moves = reasons_text.count("Слишком резкое движение")
-
-    bot.reply_to(message, f"""
-АУДИТ ПРОПУСКОВ
-
-Всего решений: {total}
-Открыто: {opened}
-Пропущено: {skipped}
-
-Кандидаты:
-LONG: {long_count}
-SHORT: {short_count}
-NONE: {none_count}
-
-Причины пропусков:
-Низкий Alpha: {low_alpha}
-Уже есть сделка: {open_trade_blocks}
-Дневной лимит: {daily_limit_blocks}
-Нет направления: {no_direction_blocks}
-BTC против: {btc_against}
-Поздний вход: {late_entries}
-Резкое движение: {sharp_moves}
-
-Цель: понять, что душит сделки.
-""")
-
-
-@bot.message_handler(commands=["short_audit"])
-def short_audit(message):
-    if not os.path.exists(DECISIONS_FILE):
-        bot.reply_to(message, "Аудита SHORT пока нет.")
-        return
-
-    df = pd.read_csv(DECISIONS_FILE)
-    if df.empty:
-        bot.reply_to(message, "Аудита SHORT пока нет.")
-        return
-
-    total = len(df)
-    short_df = df[df["candidate"] == "SHORT"]
-    short_total = len(short_df)
-    short_opened = len(short_df[short_df["action"] == "OPEN"])
-    short_skipped = len(short_df[short_df["action"] == "SKIP"])
-
-    none_count = len(df[df["candidate"] == "NONE"])
-
-    avg_short_alpha = round(short_df["alpha"].mean(), 2) if short_total > 0 else 0
-
-    if short_total == 0:
-        text = f"""
-SHORT AUDIT
-
-Всего решений: {total}
-SHORT кандидатов: 0
-NONE: {none_count}
-
-Вывод:
-Бот почти не доходит до стадии SHORT.
-Значит проблема, скорее всего, в базовом фильтре:
-1H тренд / 15M тренд / RSI не дают SHORT-кандидата.
-
-Нужно отдельно проверять detect_candidate().
-"""
-    else:
-        text = f"""
-SHORT AUDIT
-
-Всего решений: {total}
-SHORT кандидатов: {short_total}
-SHORT открыто: {short_opened}
-SHORT пропущено: {short_skipped}
-Средний Alpha SHORT: {avg_short_alpha}
-
-Если SHORT есть, но не открываются —
-смотрим Alpha и причины отказа.
-"""
-
-    bot.reply_to(message, text)
 
 def auto_check():
     while True:
