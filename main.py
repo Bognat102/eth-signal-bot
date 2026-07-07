@@ -165,6 +165,7 @@ def update_trade_results():
         tp1 = float(row["tp1"])
         tp2 = float(row["tp2"])
         status = row["status"]
+        tp1_hit = str(row.get("tp1_hit", "NO"))
 
         if signal == "LONG":
             if current_price >= tp2:
@@ -179,8 +180,12 @@ def update_trade_results():
                 df.at[i, "result"] = round(tp1 - entry, 2)
                 changed = True
             elif current_price <= stop:
-                df.at[i, "status"] = "STOP"
-                df.at[i, "result"] = round(stop - entry, 2)
+                if tp1_hit == "YES" or status == "TP1_HIT":
+                    df.at[i, "status"] = "TP1_BE"
+                    df.at[i, "result"] = round(tp1 - entry, 2)
+                else:
+                    df.at[i, "status"] = "STOP"
+                    df.at[i, "result"] = round(stop - entry, 2)
                 changed = True
 
         elif signal == "SHORT":
@@ -196,13 +201,16 @@ def update_trade_results():
                 df.at[i, "result"] = round(entry - tp1, 2)
                 changed = True
             elif current_price >= stop:
-                df.at[i, "status"] = "STOP"
-                df.at[i, "result"] = round(entry - stop, 2)
+                if tp1_hit == "YES" or status == "TP1_HIT":
+                    df.at[i, "status"] = "TP1_BE"
+                    df.at[i, "result"] = round(entry - tp1, 2)
+                else:
+                    df.at[i, "status"] = "STOP"
+                    df.at[i, "result"] = round(entry - stop, 2)
                 changed = True
 
     if changed:
         df.to_csv(TRADES_FILE, index=False)
-
 
 def detect_candidate(last_15m, last_1h):
     trend_long = last_1h["close"] > last_1h["ema50"] and last_1h["ema20"] > last_1h["ema50"]
