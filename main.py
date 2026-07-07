@@ -148,6 +148,7 @@ def save_trade(signal, price, rsi, atr, adx, alpha, stop, tp1, tp2, reasons):
 def update_trade_results():
     if not os.path.exists(TRADES_FILE):
         return
+
     df = pd.read_csv(TRADES_FILE)
     if df.empty:
         return
@@ -165,59 +166,58 @@ def update_trade_results():
         tp1 = float(row["tp1"])
         tp2 = float(row["tp2"])
         status = row["status"]
+        tp1_hit = str(row.get("tp1_hit", "NO"))
 
         if signal == "LONG":
+
             if current_price >= tp2:
                 df.at[i, "status"] = "TP2_HIT"
                 df.at[i, "tp1_hit"] = "YES"
                 df.at[i, "result"] = round(tp2 - entry, 2)
                 changed = True
+
             elif current_price >= tp1 and status == "OPEN":
                 df.at[i, "status"] = "TP1_HIT"
                 df.at[i, "tp1_hit"] = "YES"
                 df.at[i, "stop"] = entry
                 df.at[i, "result"] = round(tp1 - entry, 2)
                 changed = True
+
             elif current_price <= stop:
-                df.at[i, "status"] = "STOP"
-                df.at[i, "result"] = round(stop - entry, 2)
+                if tp1_hit == "YES" or status == "TP1_HIT":
+                    df.at[i, "status"] = "TP1_BE"
+                    df.at[i, "result"] = round(tp1 - entry, 2)
+                else:
+                    df.at[i, "status"] = "STOP"
+                    df.at[i, "result"] = round(stop - entry, 2)
                 changed = True
 
         elif signal == "SHORT":
+
             if current_price <= tp2:
                 df.at[i, "status"] = "TP2_HIT"
                 df.at[i, "tp1_hit"] = "YES"
                 df.at[i, "result"] = round(entry - tp2, 2)
                 changed = True
+
             elif current_price <= tp1 and status == "OPEN":
                 df.at[i, "status"] = "TP1_HIT"
                 df.at[i, "tp1_hit"] = "YES"
                 df.at[i, "stop"] = entry
                 df.at[i, "result"] = round(entry - tp1, 2)
                 changed = True
+
             elif current_price >= stop:
-                df.at[i, "status"] = "STOP"
-                df.at[i, "result"] = round(entry - stop, 2)
+                if tp1_hit == "YES" or status == "TP1_HIT":
+                    df.at[i, "status"] = "TP1_BE"
+                    df.at[i, "result"] = round(entry - tp1, 2)
+                else:
+                    df.at[i, "status"] = "STOP"
+                    df.at[i, "result"] = round(entry - stop, 2)
                 changed = True
 
     if changed:
         df.to_csv(TRADES_FILE, index=False)
-
-
-def detect_candidate(last_15m, last_1h):
-    trend_long = last_1h["close"] > last_1h["ema50"] and last_1h["ema20"] > last_1h["ema50"]
-    trend_short = last_1h["close"] < last_1h["ema50"] and last_1h["ema20"] < last_1h["ema50"]
-
-    local_long = last_15m["close"] > last_15m["ema50"] and last_15m["ema20"] > last_15m["ema50"]
-    local_short = last_15m["close"] < last_15m["ema50"] and last_15m["ema20"] < last_15m["ema50"]
-
-    rsi = safe_float(last_15m["rsi"])
-
-    if trend_long and local_long and 45 <= rsi <= 75:
-        return "LONG"
-    if trend_short and local_short and 25 <= rsi <= 55:
-        return "SHORT"
-    return "NONE"
 
 
 def btc_confirmation(candidate):
