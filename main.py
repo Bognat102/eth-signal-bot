@@ -605,7 +605,112 @@ def history(message):
 
     bot.reply_to(message, "ИСТОРИЯ ПОСЛЕДНИХ СДЕЛОК\n\n" + "\n".join(lines))
 
+@bot.message_handler(commands=["skip_audit"])
+def skip_audit(message):
+    if not os.path.exists(DECISIONS_FILE):
+        bot.reply_to(message, "Аудита пока нет.")
+        return
 
+    df = pd.read_csv(DECISIONS_FILE)
+    if df.empty:
+        bot.reply_to(message, "Аудита пока нет.")
+        return
+
+    total = len(df)
+    opened = len(df[df["action"] == "OPEN"])
+    skipped = len(df[df["action"] == "SKIP"])
+
+    none_count = len(df[df["candidate"] == "NONE"])
+    long_count = len(df[df["candidate"] == "LONG"])
+    short_count = len(df[df["candidate"] == "SHORT"])
+
+    low_alpha = len(df[(df["action"] == "SKIP") & (df["alpha"] < ALPHA_THRESHOLD)])
+
+    reasons_text = " | ".join(df["reasons"].astype(str).tolist())
+
+    open_trade_blocks = reasons_text.count("Уже есть открытая сделка")
+    daily_limit_blocks = reasons_text.count("Дневной лимит сделок")
+    no_direction_blocks = reasons_text.count("Нет базового направления")
+    btc_against = reasons_text.count("BTC против направления")
+    late_entries = reasons_text.count("Слишком поздний вход")
+    sharp_moves = reasons_text.count("Слишком резкое движение")
+
+    bot.reply_to(message, f"""
+АУДИТ ПРОПУСКОВ
+
+Всего решений: {total}
+Открыто: {opened}
+Пропущено: {skipped}
+
+Кандидаты:
+LONG: {long_count}
+SHORT: {short_count}
+NONE: {none_count}
+
+Причины пропусков:
+Низкий Alpha: {low_alpha}
+Уже есть сделка: {open_trade_blocks}
+Дневной лимит: {daily_limit_blocks}
+Нет направления: {no_direction_blocks}
+BTC против: {btc_against}
+Поздний вход: {late_entries}
+Резкое движение: {sharp_moves}
+
+Цель: понять, что душит сделки.
+""")
+
+
+@bot.message_handler(commands=["short_audit"])
+def short_audit(message):
+    if not os.path.exists(DECISIONS_FILE):
+        bot.reply_to(message, "Аудита SHORT пока нет.")
+        return
+
+    df = pd.read_csv(DECISIONS_FILE)
+    if df.empty:
+        bot.reply_to(message, "Аудита SHORT пока нет.")
+        return
+
+    total = len(df)
+    short_df = df[df["candidate"] == "SHORT"]
+    short_total = len(short_df)
+    short_opened = len(short_df[short_df["action"] == "OPEN"])
+    short_skipped = len(short_df[short_df["action"] == "SKIP"])
+
+    none_count = len(df[df["candidate"] == "NONE"])
+
+    avg_short_alpha = round(short_df["alpha"].mean(), 2) if short_total > 0 else 0
+
+    if short_total == 0:
+        text = f"""
+SHORT AUDIT
+
+Всего решений: {total}
+SHORT кандидатов: 0
+NONE: {none_count}
+
+Вывод:
+Бот почти не доходит до стадии SHORT.
+Значит проблема, скорее всего, в базовом фильтре:
+1H тренд / 15M тренд / RSI не дают SHORT-кандидата.
+
+Нужно отдельно проверять detect_candidate().
+"""
+    else:
+        text = f"""
+SHORT AUDIT
+
+Всего решений: {total}
+SHORT кандидатов: {short_total}
+SHORT открыто: {short_opened}
+SHORT пропущено: {short_skipped}
+Средний Alpha SHORT: {avg_short_alpha}
+
+Если SHORT есть, но не открываются —
+смотрим Alpha и причины отказа.
+"""
+
+    bot.reply_to(message, text)
 
 def auto_check():
     while True:
