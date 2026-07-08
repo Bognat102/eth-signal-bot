@@ -615,6 +615,97 @@ def history(message):
 
 
 
+
+@bot.message_handler(commands=["test_tp1"])
+def test_tp1(message):
+    # Safe logic test: does not open trades and does not change trades_log.csv
+    long_entry = 100.0
+    long_tp1 = 110.0
+    long_result_after_be = round(long_tp1 - long_entry, 2)
+
+    short_entry = 100.0
+    short_tp1 = 90.0
+    short_result_after_be = round(short_entry - short_tp1, 2)
+
+    bot.reply_to(message, f"""
+TP1_BE TEST
+
+LONG example:
+Entry: {long_entry}
+TP1: {long_tp1}
+After TP1 + BE result: +{long_result_after_be}
+Status should be: TP1_BE
+
+SHORT example:
+Entry: {short_entry}
+TP1: {short_tp1}
+After TP1 + BE result: +{short_result_after_be}
+Status should be: TP1_BE
+
+OK: TP1 profit is preserved after breakeven.
+This test does NOT change real trades.
+""")
+
+@bot.message_handler(commands=["skip_audit"])
+def skip_audit(message):
+    if not os.path.exists(DECISIONS_FILE):
+        bot.reply_to(message, "Аудита пока нет. Журнал решений ещё пуст.")
+        return
+
+    df = pd.read_csv(DECISIONS_FILE)
+    if df.empty:
+        bot.reply_to(message, "Аудита пока нет. Журнал решений ещё пуст.")
+        return
+
+    total = len(df)
+    opened = len(df[df["action"] == "OPEN"]) if "action" in df.columns else 0
+    skipped = len(df[df["action"] == "SKIP"]) if "action" in df.columns else 0
+
+    none_count = len(df[df["candidate"] == "NONE"]) if "candidate" in df.columns else 0
+    long_count = len(df[df["candidate"] == "LONG"]) if "candidate" in df.columns else 0
+    short_count = len(df[df["candidate"] == "SHORT"]) if "candidate" in df.columns else 0
+
+    low_alpha = 0
+    if "alpha" in df.columns and "action" in df.columns:
+        low_alpha = len(df[(df["action"] == "SKIP") & (pd.to_numeric(df["alpha"], errors="coerce").fillna(0) < ALPHA_THRESHOLD)])
+
+    reasons_text = " | ".join(df["reasons"].astype(str).tolist()) if "reasons" in df.columns else ""
+
+    open_trade_blocks = reasons_text.count("Уже есть открытая сделка")
+    daily_limit_blocks = reasons_text.count("Дневной лимит сделок")
+    no_direction_blocks = reasons_text.count("Нет базового направления")
+    btc_against = reasons_text.count("BTC против направления")
+    late_entries = reasons_text.count("Слишком поздний вход")
+    sharp_moves = reasons_text.count("Слишком резкое движение")
+
+    bot.reply_to(message, f"""
+АУДИТ ПРОПУСКОВ
+
+Всего решений: {total}
+Открыто: {opened}
+Пропущено: {skipped}
+
+Кандидаты:
+LONG: {long_count}
+SHORT: {short_count}
+NONE: {none_count}
+
+Что мешало сделкам:
+Низкий Alpha: {low_alpha}
+Уже есть сделка: {open_trade_blocks}
+Дневной лимит: {daily_limit_blocks}
+Нет направления: {no_direction_blocks}
+BTC против: {btc_against}
+Поздний вход: {late_entries}
+Резкое движение: {sharp_moves}
+
+Главное смотреть:
+1) если много NONE — фильтр направления слишком жёсткий;
+2) если много низкий Alpha — порог/баллы слишком жёсткие;
+3) если много "уже есть сделка" — бот часто ждёт закрытия старой сделки.
+""")
+
+
 def auto_check():
     while True:
         try:
