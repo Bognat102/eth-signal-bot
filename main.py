@@ -32,6 +32,8 @@ DECISIONS_FILE = "decisions_log.csv"
 SLEEP_SECONDS = 300
 ALPHA_THRESHOLD = 70
 ADX_MIN = 35
+ADX_SOFT_MIN = 25
+ALPHA_STRONG_THRESHOLD = 85
 MAX_EXT_ATR = 1.5
 MAX_TRADES_PER_DAY = 20
 LIVE_TRADING_ENABLED = False
@@ -301,8 +303,11 @@ def calculate_alpha(candidate, df_15m, last_15m, last_1h):
     if adx >= ADX_MIN:
         score += 15
         reasons.append(f"ADX сильный: {round(adx,2)}")
+    elif adx >= ADX_SOFT_MIN:
+        score += 8
+        reasons.append(f"ADX средний: {round(adx,2)} — вход возможен только при Alpha >= {ALPHA_STRONG_THRESHOLD}")
     else:
-        reasons.append(f"ADX ниже {ADX_MIN} — слабый тренд")
+        reasons.append(f"ADX ниже {ADX_SOFT_MIN} — слабый тренд")
 
     # Volume: 10 points, not mandatory
     if volume_ratio >= 1.2:
@@ -396,8 +401,11 @@ def analyze_strong_signal():
         candidate in ["LONG", "SHORT"]
         and alpha >= ALPHA_THRESHOLD
         and atr > 0
-        and adx >= ADX_MIN
         and abs(price - safe_float(last_15m["ema20"])) <= atr * MAX_EXT_ATR
+        and (
+            adx >= ADX_MIN
+            or (adx >= ADX_SOFT_MIN and alpha >= ALPHA_STRONG_THRESHOLD)
+        )
     ):
         signal = candidate
         stop, tp1, tp2 = make_trade_levels(signal, price, atr)
@@ -407,7 +415,7 @@ def analyze_strong_signal():
     else:
         reasons = [
             "NO TRADE",
-            f"Alpha ниже порога {ALPHA_THRESHOLD}, ADX ниже {ADX_MIN}, поздний вход или нет направления"
+            f"Alpha ниже {ALPHA_THRESHOLD}, ADX слабый/средний без сильного Alpha, поздний вход или нет направления"
         ] + reasons
         save_decision("SKIP", candidate, alpha, price, rsi, atr, adx, reasons)
 
