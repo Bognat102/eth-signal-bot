@@ -15,7 +15,12 @@ CHAT_ID_RAW = os.getenv("CHAT_ID")
 CHAT_ID = int(CHAT_ID_RAW) if CHAT_ID_RAW else None
 
 bot = telebot.TeleBot(TOKEN) if TOKEN else None
-exchange = ccxt.binance({"enableRateLimit": True})
+exchange = ccxt.binance({
+    "enableRateLimit": True,
+    "options": {
+        "defaultType": "future"
+    }
+})
 
 SYMBOL = "ETH/USDT"
 BTC_SYMBOL = "BTC/USDT"
