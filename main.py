@@ -22,8 +22,8 @@ exchange = ccxt.binance({
     }
 })
 
-SYMBOL = "ETH/USDT"
-BTC_SYMBOL = "BTC/USDT"
+SYMBOL = "ETH/USDT:USDT"
+BTC_SYMBOL = "BTC/USDT:USDT"
 SYMBOL_NAME = "ETHUSDT"
 
 TRADES_FILE = "trades_log.csv"
