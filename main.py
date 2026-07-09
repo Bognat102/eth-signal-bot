@@ -512,6 +512,7 @@ def market(message):
     df1h = get_data(SYMBOL, "1h", 250)
     last15 = df15.iloc[-2]
     last1h = df1h.iloc[-2]
+    current_price = exchange.fetch_ticker(SYMBOL)["last"]
 
     trend1h = "BULLISH" if last1h["ema20"] > last1h["ema50"] else "BEARISH"
     trend15 = "BULLISH" if last15["ema20"] > last15["ema50"] else "BEARISH"
@@ -523,7 +524,8 @@ def market(message):
 Тренд 1H: {trend1h}
 Тренд 15M: {trend15}
 
-Цена: {round(safe_float(last15['close']), 2)}
+Цена свечи 15M: {round(safe_float(last15["close"]), 2)}
+Текущая цена: {round(float(current_price), 2)}
 RSI: {round(safe_float(last15['rsi']), 2)}
 ADX: {round(safe_float(last15['adx']), 2)}
 ATR: {round(safe_float(last15['atr']), 2)}
