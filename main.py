@@ -15,23 +15,18 @@ CHAT_ID_RAW = os.getenv("CHAT_ID")
 CHAT_ID = int(CHAT_ID_RAW) if CHAT_ID_RAW else None
 
 bot = telebot.TeleBot(TOKEN) if TOKEN else None
-exchange = ccxt.binance({
-    "enableRateLimit": True,
-    "options": {
-        "defaultType": "future"
-    }
-})
+exchange = ccxt.binance({"enableRateLimit": True})
 
-SYMBOL = "ETH/USDT:USDT"
-BTC_SYMBOL = "BTC/USDT:USDT"
+SYMBOL = "ETH/USDT"
+BTC_SYMBOL = "BTC/USDT"
 SYMBOL_NAME = "ETHUSDT"
 
 TRADES_FILE = "trades_log.csv"
 DECISIONS_FILE = "decisions_log.csv"
 
-SLEEP_SECONDS = 300
+SLEEP_SECONDS = 900
 ALPHA_THRESHOLD = 70
-MAX_TRADES_PER_DAY = 20
+MAX_TRADES_PER_DAY = 6
 LIVE_TRADING_ENABLED = False
 
 
@@ -512,7 +507,6 @@ def market(message):
     df1h = get_data(SYMBOL, "1h", 250)
     last15 = df15.iloc[-2]
     last1h = df1h.iloc[-2]
-    current_price = exchange.fetch_ticker(SYMBOL)["last"]
 
     trend1h = "BULLISH" if last1h["ema20"] > last1h["ema50"] else "BEARISH"
     trend15 = "BULLISH" if last15["ema20"] > last15["ema50"] else "BEARISH"
@@ -524,8 +518,7 @@ def market(message):
 Тренд 1H: {trend1h}
 Тренд 15M: {trend15}
 
-Цена свечи 15M: {round(safe_float(last15["close"]), 2)}
-Текущая цена: {round(float(current_price), 2)}
+Цена: {round(safe_float(last15['close']), 2)}
 RSI: {round(safe_float(last15['rsi']), 2)}
 ADX: {round(safe_float(last15['adx']), 2)}
 ATR: {round(safe_float(last15['atr']), 2)}
