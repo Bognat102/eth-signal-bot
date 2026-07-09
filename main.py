@@ -31,6 +31,8 @@ DECISIONS_FILE = "decisions_log.csv"
 
 SLEEP_SECONDS = 300
 ALPHA_THRESHOLD = 70
+ADX_MIN = 35
+MAX_EXT_ATR = 1.5
 MAX_TRADES_PER_DAY = 20
 LIVE_TRADING_ENABLED = False
 
@@ -296,10 +298,11 @@ def calculate_alpha(candidate, df_15m, last_15m, last_1h):
             score += 8; reasons.append(f"RSI допустимый для SHORT: {round(rsi,2)}")
 
     # ADX/trend strength: 15 points
-    if adx >= 25:
-        score += 15; reasons.append(f"ADX сильный: {round(adx,2)}")
-    elif adx >= 18:
-        score += 8; reasons.append(f"ADX допустимый: {round(adx,2)}")
+    if adx >= ADX_MIN:
+        score += 15
+        reasons.append(f"ADX сильный: {round(adx,2)}")
+    else:
+        reasons.append(f"ADX ниже {ADX_MIN} — слабый тренд")
 
     # Volume: 10 points, not mandatory
     if volume_ratio >= 1.2:
@@ -325,7 +328,7 @@ def calculate_alpha(candidate, df_15m, last_15m, last_1h):
     distance = abs(close - ema20)
     last_3_move = abs(safe_float(df_15m["close"].iloc[-2]) - safe_float(df_15m["close"].iloc[-5]))
 
-    if atr > 0 and distance <= atr * 1.8:
+    if atr > 0 and distance <= atr * MAX_EXT_ATR:
         score += 10; reasons.append("Вход не слишком поздний")
     elif atr > 0 and distance <= atr * 2.5:
         score += 4; reasons.append("Вход немного поздний, но допустимый")
@@ -389,14 +392,23 @@ def analyze_strong_signal():
         reasons = [f"Дневной лимит сделок достигнут: {MAX_TRADES_PER_DAY}"] + reasons
         save_decision("SKIP", candidate, alpha, price, rsi, atr, adx, reasons)
 
-    elif candidate in ["LONG", "SHORT"] and alpha >= ALPHA_THRESHOLD and atr > 0:
+    elif (
+        candidate in ["LONG", "SHORT"]
+        and alpha >= ALPHA_THRESHOLD
+        and atr > 0
+        and adx >= ADX_MIN
+        and abs(price - safe_float(last_15m["ema20"])) <= atr * MAX_EXT_ATR
+    ):
         signal = candidate
         stop, tp1, tp2 = make_trade_levels(signal, price, atr)
         save_trade(signal, price, rsi, atr, adx, alpha, stop, tp1, tp2, reasons)
         save_decision("OPEN", candidate, alpha, price, rsi, atr, adx, reasons)
 
     else:
-        reasons = ["NO TRADE", f"Alpha ниже порога {ALPHA_THRESHOLD} или нет направления"] + reasons
+        reasons = [
+            "NO TRADE",
+            f"Alpha ниже порога {ALPHA_THRESHOLD}, ADX ниже {ADX_MIN}, поздний вход или нет направления"
+        ] + reasons
         save_decision("SKIP", candidate, alpha, price, rsi, atr, adx, reasons)
 
     text = f"""
