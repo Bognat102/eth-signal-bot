@@ -195,6 +195,14 @@ def default_state() -> Dict[str, Any]:
         "trades_today": 0,
         "trades_day": utc_now().strftime("%Y-%m-%d"),
         "last_processed_5m_open_time": None,
+        "last_check_time": None,
+        "last_direction": "NONE",
+        "last_confirmation": False,
+        "last_signal": "NO TRADE",
+        "last_futures_price": None,
+        "last_reason": "Бот ещё не выполнил первую проверку",
+        "checks_today": 0,
+        "checks_day": utc_now().strftime("%Y-%m-%d"),
     }
 
 
@@ -230,6 +238,10 @@ def reset_daily_counter(state: Dict[str, Any]) -> None:
     if state.get("trades_day") != today:
         state["trades_day"] = today
         state["trades_today"] = 0
+
+    if state.get("checks_day") != today:
+        state["checks_day"] = today
+        state["checks_today"] = 0
 
 
 # ============================================================================
@@ -655,34 +667,71 @@ def manage_open_trade(state: Dict[str, Any], candle: pd.Series) -> None:
 # MARKET ANALYSIS
 # ============================================================================
 
-def analyze_market(state: Dict[str, Any]) -> None:
-    reset_daily_counter(state)
-
+def market_snapshot() -> Dict[str, Any]:
     candle = latest_closed_5m()
-    candle_open_time = int(candle["time"])
-
-    # Prevent the same 5m candle from being processed twice.
-    if state.get("last_processed_5m_open_time") == candle_open_time:
-        return
-
-    state["last_processed_5m_open_time"] = candle_open_time
-
-    # First manage an existing trade using the just-closed 5m candle.
-    manage_open_trade(state, candle)
-
     context = turtle_15m_context()
     direction = context["direction"]
-
     candle_open = float(candle["open"])
     candle_close = float(candle["close"])
-
-    five_minute_confirmation = (
+    confirmation = (
         direction == "LONG" and candle_close > candle_open
     ) or (
         direction == "SHORT" and candle_close < candle_open
     )
+    return {
+        "candle": candle,
+        "context": context,
+        "direction": direction,
+        "confirmation": confirmation,
+        "futures_price": current_futures_price(),
+    }
 
-    futures_price = current_futures_price()
+
+def no_trade_reason(state, direction, confirmation):
+    if state.get("open_trade"):
+        t = state["open_trade"]
+        return f"Уже есть открытая сделка {t['side']} на стадии {t['stage']}"
+    if int(state.get("trades_today", 0)) >= MAX_TRADES_PER_DAY:
+        return f"Достигнут дневной лимит {MAX_TRADES_PER_DAY} сделок"
+    if direction is None:
+        return (
+            "Нет пробоя Turtle 20: текущая 15M цена находится "
+            "между максимумом и минимумом предыдущих 20 свечей"
+        )
+    if not confirmation:
+        if direction == "LONG":
+            return "Есть направление LONG, но последняя закрытая 5M свеча не бычья"
+        return "Есть направление SHORT, но последняя закрытая 5M свеча не медвежья"
+    return "Все условия входа выполнены"
+
+
+def analyze_market(state: Dict[str, Any]) -> None:
+    reset_daily_counter(state)
+
+    snapshot = market_snapshot()
+    candle = snapshot["candle"]
+    context = snapshot["context"]
+    direction = snapshot["direction"]
+    five_minute_confirmation = snapshot["confirmation"]
+    futures_price = snapshot["futures_price"]
+
+    candle_open_time = int(candle["time"])
+
+    if state.get("last_processed_5m_open_time") == candle_open_time:
+        return
+
+    state["last_processed_5m_open_time"] = candle_open_time
+    manage_open_trade(state, candle)
+
+    candle_open = float(candle["open"])
+    candle_close = float(candle["close"])
+    reason = no_trade_reason(state, direction, five_minute_confirmation)
+
+    state["last_check_time"] = now_str()
+    state["last_direction"] = direction or "NONE"
+    state["last_confirmation"] = bool(five_minute_confirmation)
+    state["last_futures_price"] = futures_price
+    state["checks_today"] = int(state.get("checks_today", 0)) + 1
 
     append_csv(
         DECISIONS_FILE,
@@ -731,6 +780,8 @@ def analyze_market(state: Dict[str, Any]) -> None:
         equity=f"{float(state['equity']):.6f} USDT",
     )
 
+    opened_now = False
+
     if (
         not state.get("open_trade")
         and direction in {"LONG", "SHORT"}
@@ -744,7 +795,20 @@ def analyze_market(state: Dict[str, Any]) -> None:
             candle,
             context,
         )
+        opened_now = True
 
+    if opened_now:
+        state["last_signal"] = direction
+        state["last_reason"] = "Все условия выполнены — paper-сделка открыта"
+    else:
+        state["last_signal"] = "NO TRADE"
+        state["last_reason"] = reason
+
+    print(
+        f"Автопроверка ETHUSDT выполнена: {state['last_signal']} | "
+        f"Причина: {state['last_reason']}",
+        flush=True,
+    )
     save_state(state)
 
 
@@ -775,19 +839,86 @@ def auto_check() -> None:
 def start(message):
     bot.reply_to(
         message,
-        "ETH Turtle 20 paper bot works.\n"
-        "Market: Binance Futures\n"
-        "Check: every 5 minutes\n"
-        "Commands: /price /status /history",
+        "ETH Turtle 20 paper bot работает.\n"
+        "Рынок: Binance Futures\n"
+        "Проверка: каждые 5 минут\n"
+        "Команды:\n"
+        "/price — цена ETH Futures\n"
+        "/strong_signal — состояние рынка и причина входа/отказа\n"
+        "/status — состояние бота и открытой сделки\n"
+        "/history — последние события по сделкам",
     )
 
 
 @bot.message_handler(commands=["price"])
 def price(message):
-    bot.reply_to(
-        message,
-        f"ETHUSDT Futures: {current_futures_price():.2f} USDT",
-    )
+    bot.reply_to(message, f"ETHUSDT Futures: {current_futures_price():.2f} USDT")
+
+
+@bot.message_handler(commands=["strong_signal"])
+def strong_signal(message):
+    try:
+        state = load_state()
+        reset_daily_counter(state)
+        snap = market_snapshot()
+        candle = snap["candle"]
+        context = snap["context"]
+        direction = snap["direction"]
+        confirmation = snap["confirmation"]
+        futures_price = snap["futures_price"]
+        reason = no_trade_reason(state, direction, confirmation)
+
+        can_open = (
+            not state.get("open_trade")
+            and direction in {"LONG", "SHORT"}
+            and confirmation
+            and int(state.get("trades_today", 0)) < MAX_TRADES_PER_DAY
+        )
+        signal = direction if can_open else "NO TRADE"
+
+        lines = [
+            "ETHUSDT TURTLE 20",
+            "",
+            f"Сигнал: {signal}",
+            f"Направление 15M: {direction or 'NONE'}",
+            f"Подтверждение 5M: {'ЕСТЬ' if confirmation else 'НЕТ'}",
+            f"Цена Futures: {futures_price:.2f} USDT",
+            f"Turtle High 20: {float(context['previous_high']):.2f}",
+            f"Turtle Low 20: {float(context['previous_low']):.2f}",
+            f"Текущая 15M цена: {float(context['current_close']):.2f}",
+            f"Закрытая 5M свеча: {float(candle['open']):.2f} → {float(candle['close']):.2f}",
+            "",
+            f"Открытая сделка: {'ДА' if state.get('open_trade') else 'НЕТ'}",
+            f"Сделок сегодня: {int(state.get('trades_today', 0))}/{MAX_TRADES_PER_DAY}",
+            f"Капитал: {float(state.get('equity', START_EQUITY_USDT)):.2f} USDT",
+            "",
+            f"Причина: {reason}",
+        ]
+
+        if can_open:
+            entry = execution_price(futures_price, direction, True)
+            levels = make_levels(direction, entry)
+            qty, margin, notional = position_values(
+                entry,
+                float(state.get("equity", START_EQUITY_USDT)),
+            )
+            lines.extend([
+                "",
+                "УСЛОВИЯ ПОТЕНЦИАЛЬНОЙ СДЕЛКИ",
+                f"Вход: {entry:.2f}",
+                f"Стоп: {levels['stop']:.2f}",
+                f"TP1: {levels['tp1']:.2f} — закрыть 50%",
+                f"TP2: {levels['tp2']:.2f} — закрыть 30%",
+                f"TP3: {levels['tp3']:.2f} — закрыть 20%",
+                f"Маржа: {margin:.2f} USDT",
+                f"Номинал: {notional:.2f} USDT",
+                f"Количество: {qty:.6f} ETH",
+                f"Плечо: {LEVERAGE:.0f}x",
+            ])
+
+        bot.reply_to(message, "\n".join(lines))
+    except Exception as exc:
+        bot.reply_to(message, f"Ошибка ручной проверки: {type(exc).__name__}: {exc}")
 
 
 @bot.message_handler(commands=["status"])
@@ -796,24 +927,40 @@ def status(message):
     trade = state.get("open_trade")
 
     lines = [
-        f"Equity: {float(state['equity']):.2f} USDT",
-        f"Trades today: {int(state['trades_today'])}/{MAX_TRADES_PER_DAY}",
-        f"Open trade: {'YES' if trade else 'NO'}",
+        "СОСТОЯНИЕ БОТА",
+        "",
+        "Бот работает: ДА",
+        "Рынок: ETHUSDT Binance Futures",
+        "Проверка: каждые 5 минут",
+        f"Последняя проверка: {state.get('last_check_time') or 'ещё не было'}",
+        f"Проверок сегодня: {int(state.get('checks_today', 0))}",
+        f"Последний сигнал: {state.get('last_signal', 'NO TRADE')}",
+        f"Последняя причина: {state.get('last_reason', '-')}",
+        f"Последняя цена Futures: {state.get('last_futures_price') or '-'}",
+        f"Капитал: {float(state.get('equity', START_EQUITY_USDT)):.2f} USDT",
+        f"Сделок сегодня: {int(state.get('trades_today', 0))}/{MAX_TRADES_PER_DAY}",
+        "",
+        f"Открытая сделка: {'ДА' if trade else 'НЕТ'}",
     ]
 
     if trade:
+        stage_names = {
+            0: "до TP1",
+            1: "TP1 выполнен, осталось 50%",
+            2: "TP2 выполнен, осталось 20%",
+        }
         lines.extend([
-            f"Side: {trade['side']}",
-            f"Stage: {trade['stage']}",
-            f"Entry: {float(trade['entry_exec']):.2f}",
-            f"Stop: {float(trade['stop']):.2f}",
-            (
-                f"TP1 / TP2 / TP3: "
-                f"{float(trade['tp1']):.2f} / "
-                f"{float(trade['tp2']):.2f} / "
-                f"{float(trade['tp3']):.2f}"
-            ),
-            f"Remaining qty: {float(trade['qty_remaining']):.6f} ETH",
+            f"Направление: {trade['side']}",
+            f"Стадия: {stage_names.get(int(trade['stage']), trade['stage'])}",
+            f"Вход: {float(trade['entry_exec']):.2f}",
+            f"Текущий стоп: {float(trade['stop']):.2f}",
+            f"TP1: {float(trade['tp1']):.2f}",
+            f"TP2: {float(trade['tp2']):.2f}",
+            f"TP3: {float(trade['tp3']):.2f}",
+            f"Остаток позиции: {float(trade['qty_remaining']):.6f} ETH",
+            f"Зафиксированный PnL: {float(trade['realized_pnl']):.4f} USDT",
+            f"Комиссии: {float(trade['fees_paid']):.4f} USDT",
+            f"Funding: {float(trade['funding_pnl']):.4f} USDT",
         ])
 
     bot.reply_to(message, "\n".join(lines))
@@ -822,21 +969,21 @@ def status(message):
 @bot.message_handler(commands=["history"])
 def history(message):
     if not TRADES_FILE.exists():
-        bot.reply_to(message, "No trade history yet.")
+        bot.reply_to(message, "Истории сделок пока нет.")
         return
 
     df = pd.read_csv(TRADES_FILE)
     if df.empty:
-        bot.reply_to(message, "No trade history yet.")
+        bot.reply_to(message, "Истории сделок пока нет.")
         return
 
-    lines = ["LAST 10 TRADE EVENTS"]
+    lines = ["ПОСЛЕДНИЕ 10 СОБЫТИЙ ПО СДЕЛКАМ"]
     for _, row in df.tail(10).iterrows():
         lines.append(
             f"{row.get('event_time', '-')} | "
             f"{row.get('event', '-')} | "
             f"{row.get('side', '-')} | "
-            f"PnL: {row.get('event_pnl', '-')}"
+            f"PnL события: {row.get('event_pnl', '-')}"
         )
 
     bot.reply_to(message, "\n".join(lines))
