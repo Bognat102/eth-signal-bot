@@ -1,34 +1,41 @@
 """
-main_portfolio_v1.py
+main.py
 
-Портфельная версия бота: торгует НЕСКОЛЬКИМИ монетами одновременно (по умолчанию ADA+ARB),
-используя ту же проверенную логику из strategy_core.py, что и одиночный бот
-main_FLEX_ADX_EXT15_v2.py и бэктесты (backtest.py, backtest_portfolio.py).
+ETH Turtle 20 paper bot for Railway.
 
-Конфигурация подтверждена бэктестом на этих двух активах:
-- Риск на сделку: strategy_core.RISK_PER_TRADE_PCT (сейчас 5%)
-- Стоп: STOP_DISTANCE_MULT=0.6 (протестированный оптимум)
-- ADX_RANGE_MAX=30
+This file intentionally contains BOTH:
+- the already-working Railway / Telegram / Binance Futures infrastructure pattern;
+- the full Turtle 20 trading logic.
 
-ВАЖНО (то же ограничение, что и в бэктесте): риск считается независимо на каждую монету —
-если ADA и ARB одновременно откроют сделки, суммарный риск в моменте может быть
-2×RISK_PER_TRADE_PCT, а не RISK_PER_TRADE_PCT. Портфельного лимита нет.
+Only this one file needs to replace the current main.py in GitHub.
 
-Каждая монета ведёт СВОЙ отдельный файл сделок (trades_log_<symbol>.csv) и решений
-(decisions_log_<symbol>.csv), чтобы не путать логи разных активов.
+IMPORTANT:
+- PAPER MODE ONLY. No real Binance orders are placed.
+- Binance Futures data only.
+- Market check every 5 minutes.
+- Detailed Railway log for every market check and every trade event.
 """
 
+from __future__ import annotations
+
+import csv
+import json
 import os
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import ccxt
 import pandas as pd
 import telebot
 from dotenv import load_dotenv
 
-import strategy_core as sc
+
+# ============================================================================
+# ENVIRONMENT / INFRASTRUCTURE
+# ============================================================================
 
 load_dotenv()
 
@@ -37,6 +44,8 @@ CHAT_ID_RAW = os.getenv("CHAT_ID")
 CHAT_ID = int(CHAT_ID_RAW) if CHAT_ID_RAW else None
 
 bot = telebot.TeleBot(TOKEN) if TOKEN else None
+
+# Preserve the proven Binance Futures connection pattern from the old bot.
 exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {
@@ -44,377 +53,862 @@ exchange = ccxt.binance({
     }
 })
 
-SYMBOLS = ["ADA/USDT:USDT", "ARB/USDT:USDT"]
-BTC_SYMBOL = "BTC/USDT:USDT"
-
+SYMBOL = "ETH/USDT:USDT"
 SLEEP_SECONDS = 300
-LIVE_TRADING_ENABLED = False  # НЕ включай без дополнительного тестирования на реальном исполнении
+LIVE_TRADING_ENABLED = False
+
+TRADES_FILE = Path("trades_log_ETHUSDT.csv")
+DECISIONS_FILE = Path("decisions_log_ETHUSDT.csv")
+STATE_FILE = Path("state_ETHUSDT.json")
 
 
-def symbol_name(symbol):
-    return symbol.replace("/USDT:USDT", "USDT")
+# ============================================================================
+# V16 STRATEGY CONSTANTS — DO NOT CHANGE WITHOUT A NEW BACKTEST
+# ============================================================================
+
+START_EQUITY_USDT = 1000.0
+POSITION_MARGIN_PCT = 5.0
+LEVERAGE = 10.0
+
+TAKER_FEE_PCT = 0.045
+SLIPPAGE_PCT = 0.02
+
+TURTLE_LENGTH = 20
+
+INITIAL_STOP_PCT = 0.40
+TP1_PCT = 0.30
+TP2_PCT = 0.60
+TP3_PCT = 1.00
+
+TP1_CLOSE_FRACTION = 0.50
+TP2_CLOSE_FRACTION = 0.30
+TP3_CLOSE_FRACTION = 0.20
+
+MAX_TRADES_PER_DAY = 20
 
 
-def trades_file(symbol):
-    return f"trades_log_{symbol_name(symbol)}.csv"
+# ============================================================================
+# GENERIC HELPERS
+# ============================================================================
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def decisions_file(symbol):
-    return f"decisions_log_{symbol_name(symbol)}.csv"
+def now_str() -> str:
+    return utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def log_block(title: str, **values: Any) -> None:
+    print("\n" + "=" * 74, flush=True)
+    print(f"{now_str()} | {title}", flush=True)
+    for key, value in values.items():
+        print(f"{key}: {value}", flush=True)
+    print("=" * 74, flush=True)
 
 
-def get_data(symbol, timeframe="15m", limit=250):
-    candles = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(candles, columns=["time", "open", "high", "low", "close", "volume"])
-    return sc.compute_indicators(df)
+def append_csv(path: Path, row: Dict[str, Any]) -> None:
+    exists = path.exists()
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 
-def has_open_trade(symbol):
-    f = trades_file(symbol)
-    if not os.path.exists(f):
-        return False
-    df = pd.read_csv(f)
-    if df.empty or "status" not in df.columns:
-        return False
-    return not df[df["status"].isin(["OPEN", "TP1_HIT"])].empty
-
-
-def save_decision(symbol, action, candidate, alpha, price, rsi, atr, adx, reasons):
-    row = {
-        "time": now_str(), "symbol": symbol_name(symbol), "action": action,
-        "candidate": candidate, "alpha": alpha, "price": price, "rsi": rsi,
-        "atr": atr, "adx": adx, "reasons": " | ".join(reasons),
-    }
-    df = pd.DataFrame([row])
-    f = decisions_file(symbol)
-    df.to_csv(f, mode="a", header=not os.path.exists(f), index=False)
-
-
-def save_trade(symbol, signal, price, rsi, atr, adx, alpha, stop, tp1, tp2, reasons, qty, risk_amount):
-    row = {
-        "time": now_str(), "symbol": symbol_name(symbol), "signal": signal, "entry": price,
-        "rsi": rsi, "atr": atr, "adx": adx, "alpha": alpha, "stop": stop, "tp1": tp1, "tp2": tp2,
-        "qty": qty, "risk_amount": risk_amount, "status": "OPEN", "tp1_hit": "NO",
-        "peak": price, "result": "", "pnl_usdt": "", "reasons": " | ".join(reasons),
-    }
-    df = pd.DataFrame([row])
-    f = trades_file(symbol)
-    df.to_csv(f, mode="a", header=not os.path.exists(f), index=False)
-
-
-def update_trade_results(symbol):
-    """Проверяет открытые сделки ПО ЭТОЙ монете, используя high/low последней закрытой свечи."""
-    f = trades_file(symbol)
-    if not os.path.exists(f):
-        return
-    df = pd.read_csv(f)
-    if df.empty:
-        return
-
-    df15 = get_data(symbol, "15m", 3)
-    last_candle = df15.iloc[-2]
-    candle_high = sc.safe_float(last_candle["high"])
-    candle_low = sc.safe_float(last_candle["low"])
-    current_price = float(exchange.fetch_ticker(symbol)["last"])
-    changed = False
-
-    for i, row in df.iterrows():
-        if row.get("status") not in ["OPEN", "TP1_HIT"]:
-            continue
-
-        signal = row["signal"]
-        entry = float(row["entry"])
-        stop = float(row["stop"])
-        tp1 = float(row["tp1"])
-        tp2 = float(row["tp2"])
-        status = row["status"]
-        atr_entry = float(row.get("atr", 0) or 0)
-        qty = float(row.get("qty", 0) or 0)
-        peak = float(row.get("peak", entry) or entry)
-
-        def close_trade(new_status, exit_price):
-            diff = (exit_price - entry) if signal == "LONG" else (entry - exit_price)
-            pnl_usdt = sc.apply_fees(diff, entry, exit_price, qty)
-            df.at[i, "status"] = new_status
-            df.at[i, "result"] = round(diff, 2)
-            df.at[i, "pnl_usdt"] = pnl_usdt
-
-        if status == "OPEN":
-            if signal == "LONG":
-                if candle_high >= tp1 or current_price >= tp1:
-                    df.at[i, "status"] = "TP1_HIT"
-                    df.at[i, "stop"] = entry
-                    df.at[i, "peak"] = max(entry, candle_high)
-                    changed = True
-                elif candle_low <= stop or current_price <= stop:
-                    close_trade("STOP", stop)
-                    changed = True
-            else:
-                if candle_low <= tp1 or current_price <= tp1:
-                    df.at[i, "status"] = "TP1_HIT"
-                    df.at[i, "stop"] = entry
-                    df.at[i, "peak"] = min(entry, candle_low)
-                    changed = True
-                elif candle_high >= stop or current_price >= stop:
-                    close_trade("STOP", stop)
-                    changed = True
-
-        elif status == "TP1_HIT":
-            if sc.USE_TRAILING_EXIT:
-                if signal == "LONG":
-                    new_peak = max(peak, candle_high)
-                    trail_stop = new_peak - sc.TRAIL_ATR_MULT * atr_entry
-                    new_stop = max(stop, trail_stop)
-                    df.at[i, "peak"] = new_peak
-                    df.at[i, "stop"] = new_stop
-                    if candle_low <= new_stop or current_price <= new_stop:
-                        close_trade("TRAIL_EXIT", new_stop)
-                    changed = True
-                else:
-                    new_peak = min(peak, candle_low)
-                    trail_stop = new_peak + sc.TRAIL_ATR_MULT * atr_entry
-                    new_stop = min(stop, trail_stop)
-                    df.at[i, "peak"] = new_peak
-                    df.at[i, "stop"] = new_stop
-                    if candle_high >= new_stop or current_price >= new_stop:
-                        close_trade("TRAIL_EXIT", new_stop)
-                    changed = True
-            else:
-                if signal == "LONG":
-                    if candle_high >= tp2 or current_price >= tp2:
-                        close_trade("TP2_HIT", tp2)
-                        changed = True
-                    elif candle_low <= stop or current_price <= stop:
-                        close_trade("TP1_BE", entry)
-                        changed = True
-                else:
-                    if candle_low <= tp2 or current_price <= tp2:
-                        close_trade("TP2_HIT", tp2)
-                        changed = True
-                    elif candle_high >= stop or current_price >= stop:
-                        close_trade("TP1_BE", entry)
-                        changed = True
-
-    if changed:
-        df.to_csv(f, index=False)
-
-
-def funding_percentile(symbol):
+def safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        history = exchange.fetch_funding_rate_history(symbol, limit=90)
-        if not history:
-            return None
-        rates = pd.Series([h["fundingRate"] for h in history])
-        current = rates.iloc[-1]
-        return (rates <= current).mean() * 100
+        if pd.isna(value):
+            return default
+        return float(value)
     except Exception:
-        return None
+        return default
 
 
-def btc_confirmation(candidate, btc_last_15m):
-    if btc_last_15m is None:
-        return None
-    if candidate == "LONG":
-        return bool(btc_last_15m["close"] > btc_last_15m["ema50"])
-    if candidate == "SHORT":
-        return bool(btc_last_15m["close"] < btc_last_15m["ema50"])
-    return None
+def execution_price(raw_price: float, side: str, is_entry: bool) -> float:
+    slip = SLIPPAGE_PCT / 100.0
+    is_buy = (side == "LONG" and is_entry) or (
+        side == "SHORT" and not is_entry
+    )
+    return raw_price * (1 + slip if is_buy else 1 - slip)
 
 
-def get_current_equity(symbols):
-    """Текущий 'виртуальный' капитал = стартовый + сумма PnL всех закрытых сделок по ВСЕМ монетам.
-    Общий капитал, чтобы риск на новую сделку считался от реального текущего состояния портфеля
-    (согласовано с логикой backtest_portfolio.py — компаундинг на общий капитал)."""
-    equity = sc.ACCOUNT_EQUITY_USDT
-    for symbol in symbols:
-        f = trades_file(symbol)
-        if os.path.exists(f):
-            df = pd.read_csv(f)
-            if not df.empty and "pnl_usdt" in df.columns:
-                equity += pd.to_numeric(df["pnl_usdt"], errors="coerce").fillna(0).sum()
-    return equity
+def fee(notional: float) -> float:
+    return abs(notional) * TAKER_FEE_PCT / 100.0
 
 
-def analyze_symbol(symbol, btc_last_15m, current_equity):
-    update_trade_results(symbol)
+def gross_pnl(side: str, entry: float, exit_price: float, qty: float) -> float:
+    if side == "LONG":
+        return (exit_price - entry) * qty
+    return (entry - exit_price) * qty
 
-    df_15m = get_data(symbol, "15m", 250)
-    df_1h = get_data(symbol, "1h", 250)
-    last_15m = df_15m.iloc[-2]
-    last_1h = df_1h.iloc[-2]
 
-    price = round(sc.safe_float(last_15m["close"]), 2)
-    rsi = round(sc.safe_float(last_15m["rsi"]), 2)
-    atr = round(sc.safe_float(last_15m["atr"]), 2)
-    adx = round(sc.safe_float(last_15m["adx"]), 2)
+def position_values(entry: float, equity: float):
+    margin = equity * POSITION_MARGIN_PCT / 100.0
+    notional = margin * LEVERAGE
+    qty = notional / entry if entry > 0 else 0.0
+    return qty, margin, notional
 
-    funding_pctile = funding_percentile(symbol)
-    candidate = sc.detect_candidate(last_15m, last_1h, funding_pctile)
-    btc_ok = btc_confirmation(candidate, btc_last_15m) if candidate in ("LONG", "SHORT") else None
-    funding_ok = sc.funding_confirms(candidate, funding_pctile)
-    alpha, reasons = sc.calculate_alpha(candidate, df_15m, last_15m, last_1h, btc_ok, funding_ok)
 
-    signal = "NO TRADE"
-    stop = tp1 = tp2 = "-"
-    qty_text = ""
+def make_levels(side: str, entry: float):
+    if side == "LONG":
+        return {
+            "stop": entry * (1 - INITIAL_STOP_PCT / 100.0),
+            "tp1": entry * (1 + TP1_PCT / 100.0),
+            "tp2": entry * (1 + TP2_PCT / 100.0),
+            "tp3": entry * (1 + TP3_PCT / 100.0),
+        }
+    return {
+        "stop": entry * (1 + INITIAL_STOP_PCT / 100.0),
+        "tp1": entry * (1 - TP1_PCT / 100.0),
+        "tp2": entry * (1 - TP2_PCT / 100.0),
+        "tp3": entry * (1 - TP3_PCT / 100.0),
+    }
 
-    if has_open_trade(symbol):
-        reasons = ["Уже есть открытая сделка по этой монете"] + reasons
-        save_decision(symbol, "SKIP", candidate, alpha, price, rsi, atr, adx, reasons)
 
-    elif (
-        candidate in ["LONG", "SHORT"]
-        and alpha >= sc.ALPHA_THRESHOLD
-        and sc.safe_float(last_15m["bb_mid"]) > 0
-        and not (sc.USE_FUNDING_HARD_FILTER and funding_ok is False)
-    ):
-        signal = candidate
-        stop, tp1, tp2 = sc.make_trade_levels(signal, price, atr, sc.safe_float(last_15m["bb_mid"]))
-        qty, risk_amount = sc.position_size(price, stop, equity=current_equity)
-        save_trade(symbol, signal, price, rsi, atr, adx, alpha, stop, tp1, tp2, reasons, qty, risk_amount)
-        save_decision(symbol, "OPEN", candidate, alpha, price, rsi, atr, adx, reasons)
-        qty_text = f"\nРазмер позиции: {qty} (риск {risk_amount} USDT, капитал портфеля {round(current_equity,2)} USDT)"
+def remaining_position_break_even(side: str, entry_exec: float) -> float:
+    """
+    Break-even for ONLY the remaining position after TP1.
+
+    The already-realized TP1 profit is preserved.
+    The remaining position covers its own future exit fee and modeled slippage.
+    """
+    fee_rate = TAKER_FEE_PCT / 100.0
+    slip_rate = SLIPPAGE_PCT / 100.0
+
+    if side == "LONG":
+        target_exec = entry_exec / (1 - fee_rate)
+        return target_exec / (1 - slip_rate)
+
+    target_exec = entry_exec / (1 + fee_rate)
+    return target_exec / (1 + slip_rate)
+
+
+# ============================================================================
+# STATE
+# ============================================================================
+
+def default_state() -> Dict[str, Any]:
+    return {
+        "equity": START_EQUITY_USDT,
+        "open_trade": None,
+        "trades_today": 0,
+        "trades_day": utc_now().strftime("%Y-%m-%d"),
+        "last_processed_5m_open_time": None,
+    }
+
+
+def load_state() -> Dict[str, Any]:
+    if not STATE_FILE.exists():
+        return default_state()
+
+    try:
+        loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        state = default_state()
+        state.update(loaded)
+        return state
+    except Exception as exc:
+        log_block(
+            "STATE LOAD ERROR",
+            error=f"{type(exc).__name__}: {exc}",
+            action="A new paper state will be used",
+        )
+        return default_state()
+
+
+def save_state(state: Dict[str, Any]) -> None:
+    temp_file = STATE_FILE.with_suffix(".tmp")
+    temp_file.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_file.replace(STATE_FILE)
+
+
+def reset_daily_counter(state: Dict[str, Any]) -> None:
+    today = utc_now().strftime("%Y-%m-%d")
+    if state.get("trades_day") != today:
+        state["trades_day"] = today
+        state["trades_today"] = 0
+
+
+# ============================================================================
+# BINANCE FUTURES DATA
+# ============================================================================
+
+def get_data(timeframe: str, limit: int) -> pd.DataFrame:
+    candles = exchange.fetch_ohlcv(
+        SYMBOL,
+        timeframe=timeframe,
+        limit=limit,
+    )
+    return pd.DataFrame(
+        candles,
+        columns=["time", "open", "high", "low", "close", "volume"],
+    )
+
+
+def current_futures_price() -> float:
+    return float(exchange.fetch_ticker(SYMBOL)["last"])
+
+
+def latest_closed_5m() -> pd.Series:
+    df = get_data("5m", 3)
+    if len(df) < 3:
+        raise RuntimeError("Not enough 5m candles")
+    return df.iloc[-2]
+
+
+def turtle_15m_context() -> Dict[str, Any]:
+    """
+    Live implementation corresponding to the chosen old-alignment concept:
+
+    - the CURRENT forming 15m candle supplies the current close;
+    - the 20 candles BEFORE it supply the Turtle high/low.
+
+    This intentionally does not wait for the current 15m candle to close.
+    """
+    df = get_data("15m", TURTLE_LENGTH + 2)
+    if len(df) < TURTLE_LENGTH + 1:
+        raise RuntimeError("Not enough 15m candles for Turtle 20")
+
+    current = df.iloc[-1]
+    previous = df.iloc[-(TURTLE_LENGTH + 1):-1]
+
+    current_close = float(current["close"])
+    previous_high = float(previous["high"].max())
+    previous_low = float(previous["low"].min())
+
+    direction: Optional[str] = None
+    if current_close > previous_high:
+        direction = "LONG"
+    elif current_close < previous_low:
+        direction = "SHORT"
+
+    return {
+        "direction": direction,
+        "current_close": current_close,
+        "previous_high": previous_high,
+        "previous_low": previous_low,
+        "current_15m_open_time": int(current["time"]),
+    }
+
+
+def update_funding(trade: Dict[str, Any], event_time_ms: int) -> None:
+    """
+    Add funding only for the interval not processed before.
+
+    This prevents double-counting after TP1 and TP2.
+    """
+    last_time = int(trade.get("last_funding_time_ms", trade["entry_time_ms"]))
+    if event_time_ms <= last_time:
+        return
+
+    try:
+        history = exchange.fetch_funding_rate_history(
+            SYMBOL,
+            since=last_time,
+            limit=1000,
+        )
+    except Exception as exc:
+        log_block(
+            "FUNDING WARNING",
+            error=f"{type(exc).__name__}: {exc}",
+            action="Funding for this interval is temporarily recorded as 0",
+        )
+        trade["last_funding_time_ms"] = event_time_ms
+        return
+
+    rate_sum = 0.0
+    for item in history:
+        timestamp = int(item.get("timestamp") or 0)
+        if last_time < timestamp <= event_time_ms:
+            rate_sum += float(item.get("fundingRate") or 0.0)
+
+    notional = float(trade["notional_remaining"])
+    side = trade["side"]
+    funding_piece = -notional * rate_sum if side == "LONG" else notional * rate_sum
+
+    trade["funding_pnl"] = float(trade.get("funding_pnl", 0.0)) + funding_piece
+    trade["last_funding_time_ms"] = event_time_ms
+
+
+# ============================================================================
+# TRADE EVENTS
+# ============================================================================
+
+def send_telegram(text: str) -> None:
+    if CHAT_ID and bot:
+        bot.send_message(CHAT_ID, text)
+
+
+def save_trade_event(trade: Dict[str, Any], event: str, event_pnl: Any = "") -> None:
+    append_csv(
+        TRADES_FILE,
+        {
+            "event_time": now_str(),
+            "trade_id": trade["id"],
+            "event": event,
+            "side": trade["side"],
+            "entry": round(float(trade["entry_exec"]), 6),
+            "stop": round(float(trade["stop"]), 6),
+            "tp1": round(float(trade["tp1"]), 6),
+            "tp2": round(float(trade["tp2"]), 6),
+            "tp3": round(float(trade["tp3"]), 6),
+            "qty_initial": round(float(trade["qty_initial"]), 8),
+            "qty_remaining": round(float(trade["qty_remaining"]), 8),
+            "margin_usdt": round(float(trade["margin"]), 6),
+            "notional_remaining": round(float(trade["notional_remaining"]), 6),
+            "fees_paid": round(float(trade["fees_paid"]), 6),
+            "funding_pnl": round(float(trade["funding_pnl"]), 6),
+            "realized_pnl": round(float(trade["realized_pnl"]), 6),
+            "event_pnl": event_pnl,
+        },
+    )
+
+
+def open_trade(
+    state: Dict[str, Any],
+    side: str,
+    raw_entry: float,
+    candle_5m: pd.Series,
+    context: Dict[str, Any],
+) -> None:
+    equity = float(state["equity"])
+    entry_exec = execution_price(raw_entry, side, True)
+    qty, margin, notional = position_values(entry_exec, equity)
+    levels = make_levels(side, entry_exec)
+    entry_fee = fee(entry_exec * qty)
+
+    trade = {
+        "id": utc_now().strftime("%Y%m%d%H%M%S"),
+        "status": "OPEN",
+        "stage": 0,
+        "side": side,
+        "entry_time": now_str(),
+        "entry_time_ms": int(time.time() * 1000),
+        "last_funding_time_ms": int(time.time() * 1000),
+        "entry_raw": raw_entry,
+        "entry_exec": entry_exec,
+        "qty_initial": qty,
+        "qty_remaining": qty,
+        "margin": margin,
+        "notional_initial": notional,
+        "notional_remaining": notional,
+        "entry_fee": entry_fee,
+        "fees_paid": entry_fee,
+        "funding_pnl": 0.0,
+        "realized_pnl": -entry_fee,
+        "stop": levels["stop"],
+        "initial_stop": levels["stop"],
+        "tp1": levels["tp1"],
+        "tp2": levels["tp2"],
+        "tp3": levels["tp3"],
+        "turtle_current_15m_close": context["current_close"],
+        "turtle_previous_high_20": context["previous_high"],
+        "turtle_previous_low_20": context["previous_low"],
+        "signal_5m_open": float(candle_5m["open"]),
+        "signal_5m_close": float(candle_5m["close"]),
+    }
+
+    state["open_trade"] = trade
+    state["trades_today"] = int(state["trades_today"]) + 1
+    save_state(state)
+    save_trade_event(trade, "OPEN")
+
+    log_block(
+        "TRADE OPENED",
+        market="Binance Futures",
+        symbol=SYMBOL,
+        side=side,
+        entry_raw=f"{raw_entry:.6f}",
+        entry_exec=f"{entry_exec:.6f}",
+        equity_before=f"{equity:.6f} USDT",
+        margin=f"{margin:.6f} USDT ({POSITION_MARGIN_PCT:.2f}%)",
+        leverage=f"{LEVERAGE:.0f}x",
+        notional=f"{notional:.6f} USDT",
+        qty=f"{qty:.8f} ETH",
+        stop=f"{levels['stop']:.6f}",
+        tp1=f"{levels['tp1']:.6f} | close 50%",
+        tp2=f"{levels['tp2']:.6f} | close 30%",
+        tp3=f"{levels['tp3']:.6f} | close 20%",
+        entry_fee=f"{entry_fee:.6f} USDT",
+        turtle_15m_close=f"{context['current_close']:.6f}",
+        turtle_high_20=f"{context['previous_high']:.6f}",
+        turtle_low_20=f"{context['previous_low']:.6f}",
+        signal_5m=f"{float(candle_5m['open']):.6f} -> {float(candle_5m['close']):.6f}",
+        mode="PAPER ONLY",
+    )
+
+    send_telegram(
+        "\n".join([
+            f"ETHUSDT {side}",
+            f"Entry: {entry_exec:.2f}",
+            f"Stop: {levels['stop']:.2f}",
+            f"TP1: {levels['tp1']:.2f} (50%)",
+            f"TP2: {levels['tp2']:.2f} (30%)",
+            f"TP3: {levels['tp3']:.2f} (20%)",
+            f"Margin: {margin:.2f} USDT",
+            f"Leverage: {LEVERAGE:.0f}x",
+            "Paper mode",
+        ])
+    )
+
+
+def close_part(
+    state: Dict[str, Any],
+    raw_exit: float,
+    fraction: float,
+    event: str,
+    event_time_ms: int,
+) -> None:
+    trade = state["open_trade"]
+    update_funding(trade, event_time_ms)
+
+    side = trade["side"]
+    qty = min(
+        float(trade["qty_initial"]) * fraction,
+        float(trade["qty_remaining"]),
+    )
+    exit_exec = execution_price(raw_exit, side, False)
+    exit_fee = fee(exit_exec * qty)
+    pnl_piece = gross_pnl(
+        side,
+        float(trade["entry_exec"]),
+        exit_exec,
+        qty,
+    ) - exit_fee
+
+    trade["fees_paid"] = float(trade["fees_paid"]) + exit_fee
+    trade["realized_pnl"] = float(trade["realized_pnl"]) + pnl_piece
+    trade["qty_remaining"] = float(trade["qty_remaining"]) - qty
+    trade["notional_remaining"] = (
+        float(trade["qty_remaining"]) * float(trade["entry_exec"])
+    )
+
+    save_trade_event(trade, event, round(pnl_piece, 6))
+    save_state(state)
+
+    log_block(
+        event,
+        trade_id=trade["id"],
+        side=side,
+        exit_exec=f"{exit_exec:.6f}",
+        closed_qty=f"{qty:.8f}",
+        qty_remaining=f"{float(trade['qty_remaining']):.8f}",
+        event_pnl=f"{pnl_piece:.6f} USDT",
+        total_fees=f"{float(trade['fees_paid']):.6f} USDT",
+        total_funding=f"{float(trade['funding_pnl']):.6f} USDT",
+        realized_pnl_so_far=f"{float(trade['realized_pnl']):.6f} USDT",
+    )
+
+
+def finalize_trade(
+    state: Dict[str, Any],
+    raw_exit: float,
+    status: str,
+    event_time_ms: int,
+) -> None:
+    trade = state["open_trade"]
+    update_funding(trade, event_time_ms)
+
+    side = trade["side"]
+    qty = float(trade["qty_remaining"])
+    exit_exec = execution_price(raw_exit, side, False)
+    exit_fee = fee(exit_exec * qty)
+    final_piece = gross_pnl(
+        side,
+        float(trade["entry_exec"]),
+        exit_exec,
+        qty,
+    ) - exit_fee
+
+    trade["fees_paid"] = float(trade["fees_paid"]) + exit_fee
+    trade["realized_pnl"] = float(trade["realized_pnl"]) + final_piece
+
+    net_pnl = float(trade["realized_pnl"]) + float(trade["funding_pnl"])
+    equity_before = float(state["equity"])
+    equity_after = equity_before + net_pnl
+    state["equity"] = equity_after
+
+    trade["qty_remaining"] = 0.0
+    trade["notional_remaining"] = 0.0
+    trade["status"] = status
+
+    save_trade_event(trade, status, round(final_piece, 6))
+
+    log_block(
+        "TRADE CLOSED",
+        trade_id=trade["id"],
+        status=status,
+        side=side,
+        entry=f"{float(trade['entry_exec']):.6f}",
+        exit=f"{exit_exec:.6f}",
+        total_fees=f"{float(trade['fees_paid']):.6f} USDT",
+        total_funding=f"{float(trade['funding_pnl']):.6f} USDT",
+        net_pnl=f"{net_pnl:.6f} USDT",
+        equity_before=f"{equity_before:.6f} USDT",
+        equity_after=f"{equity_after:.6f} USDT",
+        return_from_start=f"{(equity_after / START_EQUITY_USDT - 1) * 100:.4f}%",
+    )
+
+    send_telegram(
+        "\n".join([
+            f"ETHUSDT closed: {status}",
+            f"Net PnL: {net_pnl:.2f} USDT",
+            f"Equity: {equity_after:.2f} USDT",
+        ])
+    )
+
+    state["open_trade"] = None
+    save_state(state)
+
+
+def manage_open_trade(state: Dict[str, Any], candle: pd.Series) -> None:
+    trade = state.get("open_trade")
+    if not trade:
+        return
+
+    side = trade["side"]
+    high = float(candle["high"])
+    low = float(candle["low"])
+    event_time_ms = int(candle["time"]) + 5 * 60 * 1000
+
+    stop = float(trade["stop"])
+    tp1 = float(trade["tp1"])
+    tp2 = float(trade["tp2"])
+    tp3 = float(trade["tp3"])
+    stage = int(trade["stage"])
+
+    if stage == 0:
+        stop_hit = low <= stop if side == "LONG" else high >= stop
+        tp1_hit = high >= tp1 if side == "LONG" else low <= tp1
+
+        # Same conservative rule as the backtest: if both are inside one candle,
+        # assume the stop happened first.
+        if stop_hit:
+            finalize_trade(state, stop, "STOP", event_time_ms)
+            return
+
+        if tp1_hit:
+            close_part(
+                state,
+                tp1,
+                TP1_CLOSE_FRACTION,
+                "TP1_HIT",
+                event_time_ms,
+            )
+            trade = state["open_trade"]
+            trade["stage"] = 1
+            trade["stop"] = remaining_position_break_even(
+                side,
+                float(trade["entry_exec"]),
+            )
+            save_state(state)
+
+            log_block(
+                "STOP MOVED AFTER TP1",
+                closed_position="50%",
+                remaining_position="50%",
+                new_stop=f"{float(trade['stop']):.6f}",
+                rule="Remaining 50% has its own cost-covered break-even",
+                tp1_profit="Preserved",
+            )
+            return
+
+    elif stage == 1:
+        stop_hit = low <= stop if side == "LONG" else high >= stop
+        tp2_hit = high >= tp2 if side == "LONG" else low <= tp2
+
+        if stop_hit:
+            finalize_trade(state, stop, "TP1_BE", event_time_ms)
+            return
+
+        if tp2_hit:
+            close_part(
+                state,
+                tp2,
+                TP2_CLOSE_FRACTION,
+                "TP2_HIT",
+                event_time_ms,
+            )
+            trade = state["open_trade"]
+            trade["stage"] = 2
+            # Stop deliberately remains at the TP1 break-even level.
+            save_state(state)
+            return
 
     else:
-        reasons = ["NO TRADE"] + reasons
-        save_decision(symbol, "SKIP", candidate, alpha, price, rsi, atr, adx, reasons)
+        stop_hit = low <= stop if side == "LONG" else high >= stop
+        tp3_hit = high >= tp3 if side == "LONG" else low <= tp3
 
-    text = f"""
-{symbol_name(symbol)} STRONG SIGNAL
+        if stop_hit:
+            finalize_trade(state, stop, "TP2_BE", event_time_ms)
+            return
 
-Сигнал: {signal}
-Кандидат: {candidate}
-Alpha Score: {alpha}/100
-Цена: {price} USDT
-RSI: {rsi}
-ATR: {atr}
-ADX: {adx}
-
-Стоп: {stop}
-Take Profit 1: {tp1}
-Take Profit 2: {tp2}{qty_text}
-
-Причины:
-- {chr(10).join(reasons)}
-
-Деньги НЕ используем. Только собираем статистику.
-"""
-    return signal, text
+        if tp3_hit:
+            finalize_trade(state, tp3, "TP3_HIT", event_time_ms)
+            return
 
 
-def analyze_all_symbols():
-    """Проверяет BTC-тренд один раз (общий для всех монет), затем анализирует каждую монету."""
-    btc_last_15m = None
-    try:
-        btc_last_15m = get_data(BTC_SYMBOL, "15m", 120).iloc[-2]
-    except Exception:
-        pass
+# ============================================================================
+# MARKET ANALYSIS
+# ============================================================================
 
-    current_equity = get_current_equity(SYMBOLS)
-    results = []
-    for symbol in SYMBOLS:
+def analyze_market(state: Dict[str, Any]) -> None:
+    reset_daily_counter(state)
+
+    candle = latest_closed_5m()
+    candle_open_time = int(candle["time"])
+
+    # Prevent the same 5m candle from being processed twice.
+    if state.get("last_processed_5m_open_time") == candle_open_time:
+        return
+
+    state["last_processed_5m_open_time"] = candle_open_time
+
+    # First manage an existing trade using the just-closed 5m candle.
+    manage_open_trade(state, candle)
+
+    context = turtle_15m_context()
+    direction = context["direction"]
+
+    candle_open = float(candle["open"])
+    candle_close = float(candle["close"])
+
+    five_minute_confirmation = (
+        direction == "LONG" and candle_close > candle_open
+    ) or (
+        direction == "SHORT" and candle_close < candle_open
+    )
+
+    futures_price = current_futures_price()
+
+    append_csv(
+        DECISIONS_FILE,
+        {
+            "time": now_str(),
+            "market": "Binance Futures",
+            "symbol": SYMBOL,
+            "five_minute_open_time": candle_open_time,
+            "five_minute_open": round(candle_open, 6),
+            "five_minute_high": round(float(candle["high"]), 6),
+            "five_minute_low": round(float(candle["low"]), 6),
+            "five_minute_close": round(candle_close, 6),
+            "current_15m_close": round(float(context["current_close"]), 6),
+            "turtle_high_20": round(float(context["previous_high"]), 6),
+            "turtle_low_20": round(float(context["previous_low"]), 6),
+            "direction": direction or "NONE",
+            "five_minute_confirmation": five_minute_confirmation,
+            "futures_last_price": round(futures_price, 6),
+            "open_trade": bool(state.get("open_trade")),
+            "trades_today": int(state["trades_today"]),
+            "equity": round(float(state["equity"]), 6),
+        },
+    )
+
+    log_block(
+        "5-MINUTE MARKET CHECK",
+        market="Binance Futures",
+        symbol=SYMBOL,
+        candle_time=pd.to_datetime(
+            candle_open_time,
+            unit="ms",
+            utc=True,
+        ),
+        candle_ohlc=(
+            f"{candle_open:.6f} / {float(candle['high']):.6f} / "
+            f"{float(candle['low']):.6f} / {candle_close:.6f}"
+        ),
+        current_futures_price=f"{futures_price:.6f}",
+        current_15m_close=f"{float(context['current_close']):.6f}",
+        turtle_high_20=f"{float(context['previous_high']):.6f}",
+        turtle_low_20=f"{float(context['previous_low']):.6f}",
+        direction=direction or "NONE",
+        five_minute_confirmation=five_minute_confirmation,
+        open_trade=bool(state.get("open_trade")),
+        trades_today=f"{int(state['trades_today'])}/{MAX_TRADES_PER_DAY}",
+        equity=f"{float(state['equity']):.6f} USDT",
+    )
+
+    if (
+        not state.get("open_trade")
+        and direction in {"LONG", "SHORT"}
+        and five_minute_confirmation
+        and int(state["trades_today"]) < MAX_TRADES_PER_DAY
+    ):
+        open_trade(
+            state,
+            direction,
+            futures_price,
+            candle,
+            context,
+        )
+
+    save_state(state)
+
+
+def auto_check() -> None:
+    state = load_state()
+
+    while True:
+        cycle_start = time.time()
+
         try:
-            signal, text = analyze_symbol(symbol, btc_last_15m, current_equity)
-            results.append((symbol, signal, text))
-        except Exception as e:
-            results.append((symbol, "ERROR", f"Ошибка анализа {symbol}: {e}"))
-    return results
+            analyze_market(state)
+        except Exception as exc:
+            log_block(
+                "AUTO CHECK ERROR",
+                error=f"{type(exc).__name__}: {exc}",
+                retry=f"After {SLEEP_SECONDS} seconds",
+            )
 
+        elapsed = time.time() - cycle_start
+        time.sleep(max(1.0, SLEEP_SECONDS - elapsed))
+
+
+# ============================================================================
+# TELEGRAM COMMANDS
+# ============================================================================
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    bot.reply_to(message, "Привет! Портфельный бот работает.\n"
-                           f"Монеты: {', '.join(symbol_name(s) for s in SYMBOLS)}\n\n"
-                           "Команды:\n/price\n/strong_signal\n/results\n/history")
+    bot.reply_to(
+        message,
+        "ETH Turtle 20 paper bot works.\n"
+        "Market: Binance Futures\n"
+        "Check: every 5 minutes\n"
+        "Commands: /price /status /history",
+    )
 
 
 @bot.message_handler(commands=["price"])
 def price(message):
-    lines = []
-    for symbol in SYMBOLS:
-        p = exchange.fetch_ticker(symbol)["last"]
-        lines.append(f"{symbol_name(symbol)}: {p} USDT")
-    bot.reply_to(message, "\n".join(lines))
+    bot.reply_to(
+        message,
+        f"ETHUSDT Futures: {current_futures_price():.2f} USDT",
+    )
 
 
-@bot.message_handler(commands=["strong_signal"])
-def strong_signal(message):
-    results = analyze_all_symbols()
-    for symbol, signal, text in results:
-        bot.reply_to(message, text)
+@bot.message_handler(commands=["status"])
+def status(message):
+    state = load_state()
+    trade = state.get("open_trade")
 
+    lines = [
+        f"Equity: {float(state['equity']):.2f} USDT",
+        f"Trades today: {int(state['trades_today'])}/{MAX_TRADES_PER_DAY}",
+        f"Open trade: {'YES' if trade else 'NO'}",
+    ]
 
-@bot.message_handler(commands=["results"])
-def results(message):
-    equity = get_current_equity(SYMBOLS)
-    lines = [f"РЕЗУЛЬТАТЫ ПОРТФЕЛЯ ({', '.join(symbol_name(s) for s in SYMBOLS)})\n"]
-    total_trades, total_closed, total_open = 0, 0, 0
-    for symbol in SYMBOLS:
-        update_trade_results(symbol)
-        f = trades_file(symbol)
-        if not os.path.exists(f):
-            lines.append(f"{symbol_name(symbol)}: сделок ещё не было")
-            continue
-        df = pd.read_csv(f)
-        if df.empty:
-            lines.append(f"{symbol_name(symbol)}: сделок ещё не было")
-            continue
-        closed = df[~df["status"].isin(["OPEN", "TP1_HIT"])]
-        open_count = len(df) - len(closed)
-        pnl_sum = pd.to_numeric(df["pnl_usdt"], errors="coerce").fillna(0).sum() if "pnl_usdt" in df.columns else 0
-        win_rate = round((pd.to_numeric(closed["pnl_usdt"], errors="coerce").fillna(0) > 0).mean() * 100, 1) if len(closed) else 0
-        lines.append(f"{symbol_name(symbol)}: {len(df)} сделок, {len(closed)} закрыто, "
-                      f"{open_count} открыто, win rate {win_rate}%, PnL {round(pnl_sum,2)} USDT")
-        total_trades += len(df)
-        total_closed += len(closed)
-        total_open += open_count
+    if trade:
+        lines.extend([
+            f"Side: {trade['side']}",
+            f"Stage: {trade['stage']}",
+            f"Entry: {float(trade['entry_exec']):.2f}",
+            f"Stop: {float(trade['stop']):.2f}",
+            (
+                f"TP1 / TP2 / TP3: "
+                f"{float(trade['tp1']):.2f} / "
+                f"{float(trade['tp2']):.2f} / "
+                f"{float(trade['tp3']):.2f}"
+            ),
+            f"Remaining qty: {float(trade['qty_remaining']):.6f} ETH",
+        ])
 
-    lines.append(f"\nВсего сделок по портфелю: {total_trades} ({total_closed} закрыто, {total_open} открыто)")
-    lines.append(f"Стартовый капитал: {sc.ACCOUNT_EQUITY_USDT} USDT")
-    lines.append(f"Текущий капитал портфеля: {round(equity, 2)} USDT")
-    lines.append(f"Доходность: {round((equity/sc.ACCOUNT_EQUITY_USDT - 1)*100, 2)}%")
-    lines.append("\nДеньги НЕ используем. Это paper-статистика.")
     bot.reply_to(message, "\n".join(lines))
 
 
 @bot.message_handler(commands=["history"])
 def history(message):
-    lines = ["ИСТОРИЯ ПОСЛЕДНИХ СДЕЛОК\n"]
-    for symbol in SYMBOLS:
-        update_trade_results(symbol)
-        f = trades_file(symbol)
-        if not os.path.exists(f):
-            continue
-        df = pd.read_csv(f)
-        if df.empty:
-            continue
-        lines.append(f"--- {symbol_name(symbol)} ---")
-        for _, row in df.tail(5).iterrows():
-            lines.append(f"{row.get('time','-')} | {row.get('signal','-')} | {row.get('status','-')} | "
-                          f"Entry: {row.get('entry','-')} | PnL: {row.get('pnl_usdt','')} USDT")
-    bot.reply_to(message, "\n".join(lines) if len(lines) > 1 else "Истории сделок пока нет.")
+    if not TRADES_FILE.exists():
+        bot.reply_to(message, "No trade history yet.")
+        return
+
+    df = pd.read_csv(TRADES_FILE)
+    if df.empty:
+        bot.reply_to(message, "No trade history yet.")
+        return
+
+    lines = ["LAST 10 TRADE EVENTS"]
+    for _, row in df.tail(10).iterrows():
+        lines.append(
+            f"{row.get('event_time', '-')} | "
+            f"{row.get('event', '-')} | "
+            f"{row.get('side', '-')} | "
+            f"PnL: {row.get('event_pnl', '-')}"
+        )
+
+    bot.reply_to(message, "\n".join(lines))
 
 
-def auto_check():
-    while True:
-        try:
-            results = analyze_all_symbols()
-            for symbol, signal, text in results:
-                if signal in ["LONG", "SHORT"] and CHAT_ID:
-                    bot.send_message(CHAT_ID, text)
-                print(f"Автопроверка {symbol_name(symbol)} выполнена:", signal, flush=True)
-        except Exception as e:
-            print("Ошибка автопроверки:", e, flush=True)
-        time.sleep(SLEEP_SECONDS)
+# ============================================================================
+# STARTUP
+# ============================================================================
+
+def startup_self_check() -> None:
+    checks = {
+        "symbol_is_eth_futures": SYMBOL == "ETH/USDT:USDT",
+        "check_every_5_minutes": SLEEP_SECONDS == 300,
+        "turtle_length_20": TURTLE_LENGTH == 20,
+        "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
+        "leverage_10x": LEVERAGE == 10.0,
+        "stop_0_40_percent": INITIAL_STOP_PCT == 0.40,
+        "tp1_0_30_percent": TP1_PCT == 0.30,
+        "tp2_0_60_percent": TP2_PCT == 0.60,
+        "tp3_1_00_percent": TP3_PCT == 1.00,
+        "tp_split_50_30_20": (
+            TP1_CLOSE_FRACTION,
+            TP2_CLOSE_FRACTION,
+            TP3_CLOSE_FRACTION,
+        ) == (0.50, 0.30, 0.20),
+        "paper_mode": LIVE_TRADING_ENABLED is False,
+    }
+
+    failed = [name for name, passed in checks.items() if not passed]
+
+    log_block(
+        "STARTUP SELF-CHECK",
+        **{name: "PASS" if passed else "FAIL" for name, passed in checks.items()},
+    )
+
+    if failed:
+        raise RuntimeError(
+            "Startup self-check failed: " + ", ".join(failed)
+        )
 
 
 if __name__ == "__main__":
     if not TOKEN or CHAT_ID is None:
-        raise RuntimeError("BOT_TOKEN или CHAT_ID не указаны в переменных окружения")
-    threading.Thread(target=auto_check, daemon=True).start()
-    print("Портфельный бот запущен на", SYMBOLS, "LIVE_TRADING_ENABLED =", LIVE_TRADING_ENABLED, flush=True)
-    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+        raise RuntimeError(
+            "BOT_TOKEN or CHAT_ID is missing in Railway Variables"
+        )
+
+    startup_self_check()
+
+    log_block(
+        "BOT START",
+        symbol=SYMBOL,
+        market="Binance Futures",
+        check_interval="Every 5 minutes",
+        strategy="Turtle 20 | current 15m direction + closed 5m entry",
+        margin=f"{POSITION_MARGIN_PCT}% of current equity",
+        leverage=f"{LEVERAGE}x",
+        stop=f"{INITIAL_STOP_PCT}%",
+        tp1=f"{TP1_PCT}% | close 50%",
+        tp2=f"{TP2_PCT}% | close 30%",
+        tp3=f"{TP3_PCT}% | close 20%",
+        live_trading=LIVE_TRADING_ENABLED,
+        mode="PAPER ONLY",
+    )
+
+    threading.Thread(
+        target=auto_check,
+        daemon=True,
+    ).start()
+
+    bot.infinity_polling(
+        skip_pending=True,
+        timeout=30,
+        long_polling_timeout=30,
+    )
