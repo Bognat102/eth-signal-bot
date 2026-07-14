@@ -67,8 +67,8 @@ STATE_FILE = Path("state_ETHUSDT.json")
 # ============================================================================
 
 START_EQUITY_USDT = 1000.0
-POSITION_MARGIN_PCT = 10.0
-LEVERAGE = 20.0
+POSITION_MARGIN_PCT = 5.0
+LEVERAGE = 10.0
 
 TAKER_FEE_PCT = 0.045
 SLIPPAGE_PCT = 0.02
