@@ -841,7 +841,7 @@ def start(message):
         message,
         "ETH Turtle 20 paper bot работает.\n"
         "Рынок: Binance Futures\n"
-        "Проверка: каждые 5 минут\n"
+        "Проверка: каждые 60 секунд\n"
         "Команды:\n"
         "/price — цена ETH Futures\n"
         "/strong_signal — состояние рынка и причина входа/отказа\n"
@@ -931,7 +931,7 @@ def status(message):
         "",
         "Бот работает: ДА",
         "Рынок: ETHUSDT Binance Futures",
-        "Проверка: каждые 5 минут",
+        "Проверка: каждые 60 секунд",
         f"Последняя проверка: {state.get('last_check_time') or 'ещё не было'}",
         f"Проверок сегодня: {int(state.get('checks_today', 0))}",
         f"Последний сигнал: {state.get('last_signal', 'NO TRADE')}",
@@ -996,7 +996,7 @@ def history(message):
 def startup_self_check() -> None:
     checks = {
         "symbol_is_eth_futures": SYMBOL == "ETH/USDT:USDT",
-        "check_every_5_minutes": SLEEP_SECONDS == 300,
+        "check_every_60_seconds": SLEEP_SECONDS == 60,
         "turtle_length_20": TURTLE_LENGTH == 20,
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
@@ -1037,7 +1037,7 @@ if __name__ == "__main__":
         "BOT START",
         symbol=SYMBOL,
         market="Binance Futures",
-        check_interval="Every 5 minutes",
+        check_interval="Every 60 seconds",
         strategy="Turtle 20 | current 15m direction + closed 5m entry",
         margin=f"{POSITION_MARGIN_PCT}% of current equity",
         leverage=f"{LEVERAGE}x",
