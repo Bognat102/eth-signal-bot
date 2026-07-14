@@ -12,7 +12,7 @@ Only this one file needs to replace the current main.py in GitHub.
 IMPORTANT:
 - PAPER MODE ONLY. No real Binance orders are placed.
 - Binance Futures data only.
-- Market check every 5 minutes.
+- Market check every 60 seconds.
 - Detailed Railway log for every market check and every trade event.
 """
 
@@ -54,7 +54,7 @@ exchange = ccxt.binance({
 })
 
 SYMBOL = "ETH/USDT:USDT"
-SLEEP_SECONDS = 300
+SLEEP_SECONDS = 60
 LIVE_TRADING_ENABLED = False
 
 TRADES_FILE = Path("trades_log_ETHUSDT.csv")
