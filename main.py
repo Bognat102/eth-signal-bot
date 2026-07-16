@@ -1000,7 +1000,7 @@ def startup_self_check() -> None:
         "turtle_length_20": TURTLE_LENGTH == 20,
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
-        "stop_0_40_percent": INITIAL_STOP_PCT == 0.40,
+        "stop_0_40_percent": INITIAL_STOP_PCT == 0.60,
         "tp1_0_30_percent": TP1_PCT == 0.30,
         "tp2_0_60_percent": TP2_PCT == 0.60,
         "tp3_1_00_percent": TP3_PCT == 1.00,
