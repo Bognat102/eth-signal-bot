@@ -75,7 +75,7 @@ SLIPPAGE_PCT = 0.02
 
 TURTLE_LENGTH = 20
 
-INITIAL_STOP_PCT = 0.40
+INITIAL_STOP_PCT = 0.60
 TP1_PCT = 0.30
 TP2_PCT = 0.60
 TP3_PCT = 1.00
@@ -757,7 +757,7 @@ def analyze_market(state: Dict[str, Any]) -> None:
     )
 
     log_block(
-        "5-MINUTE MARKET CHECK",
+        "60-SECOND MARKET CHECK",
         market="Binance Futures",
         symbol=SYMBOL,
         candle_time=pd.to_datetime(
