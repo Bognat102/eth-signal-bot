@@ -194,7 +194,7 @@ def default_state() -> Dict[str, Any]:
         "open_trade": None,
         "trades_today": 0,
         "trades_day": utc_now().strftime("%Y-%m-%d"),
-        "last_processed_5m_open_time": None,
+        "last_processed_1m_open_time": None,
         "last_check_time": None,
         "last_direction": "NONE",
         "last_confirmation": False,
@@ -668,7 +668,7 @@ def manage_open_trade(state: Dict[str, Any], candle: pd.Series) -> None:
 # ============================================================================
 
 def market_snapshot() -> Dict[str, Any]:
-    candle = latest_closed_5m()
+    candle = latest_closed_1m()
     context = turtle_15m_context()
     direction = context["direction"]
     candle_open = float(candle["open"])
@@ -717,10 +717,10 @@ def analyze_market(state: Dict[str, Any]) -> None:
 
     candle_open_time = int(candle["time"])
 
-    if state.get("last_processed_5m_open_time") == candle_open_time:
+    if state.get("last_processed_1m_open_time") == candle_open_time:
         return
 
-    state["last_processed_5m_open_time"] = candle_open_time
+    state["last_processed_1m_open_time"] = candle_open_time
     manage_open_trade(state, candle)
 
     candle_open = float(candle["open"])
