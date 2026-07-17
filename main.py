@@ -264,10 +264,10 @@ def current_futures_price() -> float:
     return float(exchange.fetch_ticker(SYMBOL)["last"])
 
 
-def latest_closed_5m() -> pd.Series:
-    df = get_data("5m", 3)
+def latest_closed_1m() -> pd.Series:
+    df = get_data("1m", 3)
     if len(df) < 3:
-        raise RuntimeError("Not enough 5m candles")
+        raise RuntimeError("Not enough 1m candles")
     return df.iloc[-2]
 
 
@@ -383,7 +383,7 @@ def open_trade(
     state: Dict[str, Any],
     side: str,
     raw_entry: float,
-    candle_5m: pd.Series,
+    candle_1m: pd.Series,
     context: Dict[str, Any],
 ) -> None:
     equity = float(state["equity"])
@@ -419,8 +419,8 @@ def open_trade(
         "turtle_current_15m_close": context["current_close"],
         "turtle_previous_high_20": context["previous_high"],
         "turtle_previous_low_20": context["previous_low"],
-        "signal_5m_open": float(candle_5m["open"]),
-        "signal_5m_close": float(candle_5m["close"]),
+        "signal_1m_open": float(candle_1m["open"]),
+        "signal_1m_close": float(candle_1m["close"]),
     }
 
     state["open_trade"] = trade
@@ -448,7 +448,7 @@ def open_trade(
         turtle_15m_close=f"{context['current_close']:.6f}",
         turtle_high_20=f"{context['previous_high']:.6f}",
         turtle_low_20=f"{context['previous_low']:.6f}",
-        signal_5m=f"{float(candle_5m['open']):.6f} -> {float(candle_5m['close']):.6f}",
+        signal_1m=f"{float(candle_1m['open']):.6f} -> {float(candle_1m['close']):.6f}",
         mode="PAPER ONLY",
     )
 
@@ -584,7 +584,7 @@ def manage_open_trade(state: Dict[str, Any], candle: pd.Series) -> None:
     side = trade["side"]
     high = float(candle["high"])
     low = float(candle["low"])
-    event_time_ms = int(candle["time"]) + 5 * 60 * 1000
+    event_time_ms = int(candle["time"]) + 1 * 60 * 1000
 
     stop = float(trade["stop"])
     tp1 = float(trade["tp1"])
@@ -700,8 +700,8 @@ def no_trade_reason(state, direction, confirmation):
         )
     if not confirmation:
         if direction == "LONG":
-            return "Есть направление LONG, но последняя закрытая 5M свеча не бычья"
-        return "Есть направление SHORT, но последняя закрытая 5M свеча не медвежья"
+            return "Есть направление LONG, но последняя закрытая 1M свеча не бычья"
+        return "Есть направление SHORT, но последняя закрытая 1M свеча не медвежья"
     return "Все условия входа выполнены"
 
 
@@ -712,7 +712,7 @@ def analyze_market(state: Dict[str, Any]) -> None:
     candle = snapshot["candle"]
     context = snapshot["context"]
     direction = snapshot["direction"]
-    five_minute_confirmation = snapshot["confirmation"]
+    one_minute_confirmation = snapshot["confirmation"]
     futures_price = snapshot["futures_price"]
 
     candle_open_time = int(candle["time"])
@@ -725,11 +725,11 @@ def analyze_market(state: Dict[str, Any]) -> None:
 
     candle_open = float(candle["open"])
     candle_close = float(candle["close"])
-    reason = no_trade_reason(state, direction, five_minute_confirmation)
+    reason = no_trade_reason(state, direction, one_minute_confirmation)
 
     state["last_check_time"] = now_str()
     state["last_direction"] = direction or "NONE"
-    state["last_confirmation"] = bool(five_minute_confirmation)
+    state["last_confirmation"] = bool(one_minute_confirmation)
     state["last_futures_price"] = futures_price
     state["checks_today"] = int(state.get("checks_today", 0)) + 1
 
@@ -739,16 +739,16 @@ def analyze_market(state: Dict[str, Any]) -> None:
             "time": now_str(),
             "market": "Binance Futures",
             "symbol": SYMBOL,
-            "five_minute_open_time": candle_open_time,
-            "five_minute_open": round(candle_open, 6),
-            "five_minute_high": round(float(candle["high"]), 6),
-            "five_minute_low": round(float(candle["low"]), 6),
-            "five_minute_close": round(candle_close, 6),
+            "one_minute_open_time": candle_open_time,
+            "one_minute_open": round(candle_open, 6),
+            "one_minute_high": round(float(candle["high"]), 6),
+            "one_minute_low": round(float(candle["low"]), 6),
+            "one_minute_close": round(candle_close, 6),
             "current_15m_close": round(float(context["current_close"]), 6),
             "turtle_high_20": round(float(context["previous_high"]), 6),
             "turtle_low_20": round(float(context["previous_low"]), 6),
             "direction": direction or "NONE",
-            "five_minute_confirmation": five_minute_confirmation,
+            "one_minute_confirmation": one_minute_confirmation,
             "futures_last_price": round(futures_price, 6),
             "open_trade": bool(state.get("open_trade")),
             "trades_today": int(state["trades_today"]),
@@ -757,7 +757,7 @@ def analyze_market(state: Dict[str, Any]) -> None:
     )
 
     log_block(
-        "60-SECOND MARKET CHECK",
+        "1-MINUTE MARKET CHECK",
         market="Binance Futures",
         symbol=SYMBOL,
         candle_time=pd.to_datetime(
@@ -774,7 +774,7 @@ def analyze_market(state: Dict[str, Any]) -> None:
         turtle_high_20=f"{float(context['previous_high']):.6f}",
         turtle_low_20=f"{float(context['previous_low']):.6f}",
         direction=direction or "NONE",
-        five_minute_confirmation=five_minute_confirmation,
+        one_minute_confirmation=one_minute_confirmation,
         open_trade=bool(state.get("open_trade")),
         trades_today=f"{int(state['trades_today'])}/{MAX_TRADES_PER_DAY}",
         equity=f"{float(state['equity']):.6f} USDT",
@@ -785,7 +785,7 @@ def analyze_market(state: Dict[str, Any]) -> None:
     if (
         not state.get("open_trade")
         and direction in {"LONG", "SHORT"}
-        and five_minute_confirmation
+        and one_minute_confirmation
         and int(state["trades_today"]) < MAX_TRADES_PER_DAY
     ):
         open_trade(
@@ -881,12 +881,12 @@ def strong_signal(message):
             "",
             f"Сигнал: {signal}",
             f"Направление 15M: {direction or 'NONE'}",
-            f"Подтверждение 5M: {'ЕСТЬ' if confirmation else 'НЕТ'}",
+            f"Подтверждение 1M: {'ЕСТЬ' if confirmation else 'НЕТ'}",
             f"Цена Futures: {futures_price:.2f} USDT",
             f"Turtle High 20: {float(context['previous_high']):.2f}",
             f"Turtle Low 20: {float(context['previous_low']):.2f}",
             f"Текущая 15M цена: {float(context['current_close']):.2f}",
-            f"Закрытая 5M свеча: {float(candle['open']):.2f} → {float(candle['close']):.2f}",
+            f"Закрытая 1M свеча: {float(candle['open']):.2f} → {float(candle['close']):.2f}",
             "",
             f"Открытая сделка: {'ДА' if state.get('open_trade') else 'НЕТ'}",
             f"Сделок сегодня: {int(state.get('trades_today', 0))}/{MAX_TRADES_PER_DAY}",
@@ -1038,7 +1038,7 @@ if __name__ == "__main__":
         symbol=SYMBOL,
         market="Binance Futures",
         check_interval="Every 60 seconds",
-        strategy="Turtle 20 | current 15m direction + closed 5m entry",
+        strategy="Turtle 20 | current 15m direction + closed 1m entry",
         margin=f"{POSITION_MARGIN_PCT}% of current equity",
         leverage=f"{LEVERAGE}x",
         stop=f"{INITIAL_STOP_PCT}%",
