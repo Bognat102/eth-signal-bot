@@ -1,11 +1,11 @@
 """
 main.py
 
-ETH Turtle 20 paper bot for Railway.
+ETH Turtle 5 paper bot for Railway.
 
 This file intentionally contains BOTH:
 - the already-working Railway / Telegram / Binance Futures infrastructure pattern;
-- the full Turtle 20 trading logic.
+- the full Turtle 5 trading logic.
 
 Only this one file needs to replace the current main.py in GitHub.
 
@@ -73,7 +73,7 @@ LEVERAGE = 10.0
 TAKER_FEE_PCT = 0.045
 SLIPPAGE_PCT = 0.02
 
-TURTLE_LENGTH = 20
+TURTLE_LENGTH = 5
 
 INITIAL_STOP_PCT = 0.60
 TP1_PCT = 0.50
@@ -276,13 +276,13 @@ def turtle_15m_context() -> Dict[str, Any]:
     Live implementation corresponding to the chosen old-alignment concept:
 
     - the CURRENT forming 15m candle supplies the current close;
-    - the 20 candles BEFORE it supply the Turtle high/low.
+    - the 5 candles BEFORE it supply the Turtle high/low.
 
     This intentionally does not wait for the current 15m candle to close.
     """
     df = get_data("15m", TURTLE_LENGTH + 2)
     if len(df) < TURTLE_LENGTH + 1:
-        raise RuntimeError("Not enough 15m candles for Turtle 20")
+        raise RuntimeError("Not enough 15m candles for Turtle 5")
 
     current = df.iloc[-1]
     previous = df.iloc[-(TURTLE_LENGTH + 1):-1]
@@ -417,8 +417,8 @@ def open_trade(
         "tp2": levels["tp2"],
         "tp3": levels["tp3"],
         "turtle_current_15m_close": context["current_close"],
-        "turtle_previous_high_20": context["previous_high"],
-        "turtle_previous_low_20": context["previous_low"],
+        "turtle_previous_high_5": context["previous_high"],
+        "turtle_previous_low_5": context["previous_low"],
         "signal_1m_open": float(candle_1m["open"]),
         "signal_1m_close": float(candle_1m["close"]),
     }
@@ -446,8 +446,8 @@ def open_trade(
         tp3=f"{levels['tp3']:.6f} | close 20%",
         entry_fee=f"{entry_fee:.6f} USDT",
         turtle_15m_close=f"{context['current_close']:.6f}",
-        turtle_high_20=f"{context['previous_high']:.6f}",
-        turtle_low_20=f"{context['previous_low']:.6f}",
+        turtle_high_5=f"{context['previous_high']:.6f}",
+        turtle_low_5=f"{context['previous_low']:.6f}",
         signal_1m=f"{float(candle_1m['open']):.6f} -> {float(candle_1m['close']):.6f}",
         mode="PAPER ONLY",
     )
@@ -695,8 +695,8 @@ def no_trade_reason(state, direction, confirmation):
         return f"Достигнут дневной лимит {MAX_TRADES_PER_DAY} сделок"
     if direction is None:
         return (
-            "Нет пробоя Turtle 20: текущая 15M цена находится "
-            "между максимумом и минимумом предыдущих 20 свечей"
+            "Нет пробоя Turtle 5: текущая 15M цена находится "
+            "между максимумом и минимумом предыдущих 5 свечей"
         )
     if not confirmation:
         if direction == "LONG":
@@ -745,8 +745,8 @@ def analyze_market(state: Dict[str, Any]) -> None:
             "one_minute_low": round(float(candle["low"]), 6),
             "one_minute_close": round(candle_close, 6),
             "current_15m_close": round(float(context["current_close"]), 6),
-            "turtle_high_20": round(float(context["previous_high"]), 6),
-            "turtle_low_20": round(float(context["previous_low"]), 6),
+            "turtle_high_5": round(float(context["previous_high"]), 6),
+            "turtle_low_5": round(float(context["previous_low"]), 6),
             "direction": direction or "NONE",
             "one_minute_confirmation": one_minute_confirmation,
             "futures_last_price": round(futures_price, 6),
@@ -771,8 +771,8 @@ def analyze_market(state: Dict[str, Any]) -> None:
         ),
         current_futures_price=f"{futures_price:.6f}",
         current_15m_close=f"{float(context['current_close']):.6f}",
-        turtle_high_20=f"{float(context['previous_high']):.6f}",
-        turtle_low_20=f"{float(context['previous_low']):.6f}",
+        turtle_high_5=f"{float(context['previous_high']):.6f}",
+        turtle_low_5=f"{float(context['previous_low']):.6f}",
         direction=direction or "NONE",
         one_minute_confirmation=one_minute_confirmation,
         open_trade=bool(state.get("open_trade")),
@@ -839,7 +839,7 @@ def auto_check() -> None:
 def start(message):
     bot.reply_to(
         message,
-        "ETH Turtle 20 paper bot работает.\n"
+        "ETH Turtle 5 paper bot работает.\n"
         "Рынок: Binance Futures\n"
         "Проверка: каждые 60 секунд\n"
         "Команды:\n"
@@ -877,14 +877,14 @@ def strong_signal(message):
         signal = direction if can_open else "NO TRADE"
 
         lines = [
-            "ETHUSDT TURTLE 20",
+            "ETHUSDT TURTLE 5",
             "",
             f"Сигнал: {signal}",
             f"Направление 15M: {direction or 'NONE'}",
             f"Подтверждение 1M: {'ЕСТЬ' if confirmation else 'НЕТ'}",
             f"Цена Futures: {futures_price:.2f} USDT",
-            f"Turtle High 20: {float(context['previous_high']):.2f}",
-            f"Turtle Low 20: {float(context['previous_low']):.2f}",
+            f"Turtle High 5: {float(context['previous_high']):.2f}",
+            f"Turtle Low 5: {float(context['previous_low']):.2f}",
             f"Текущая 15M цена: {float(context['current_close']):.2f}",
             f"Закрытая 1M свеча: {float(candle['open']):.2f} → {float(candle['close']):.2f}",
             "",
@@ -997,7 +997,7 @@ def startup_self_check() -> None:
     checks = {
         "symbol_is_eth_futures": SYMBOL == "ETH/USDT:USDT",
         "check_every_60_seconds": SLEEP_SECONDS == 60,
-        "turtle_length_20": TURTLE_LENGTH == 20,
+        "turtle_length_5": TURTLE_LENGTH == 5,
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
         "stop_0_60_percent": INITIAL_STOP_PCT == 0.60,
@@ -1038,7 +1038,7 @@ if __name__ == "__main__":
         symbol=SYMBOL,
         market="Binance Futures",
         check_interval="Every 60 seconds",
-        strategy="Turtle 20 | current 15m direction + closed 1m entry",
+        strategy="Turtle 5 | current 15m direction + closed 1m entry",
         margin=f"{POSITION_MARGIN_PCT}% of current equity",
         leverage=f"{LEVERAGE}x",
         stop=f"{INITIAL_STOP_PCT}%",
