@@ -275,23 +275,19 @@ def latest_closed_1m() -> pd.Series:
 
 def turtle_15m_context() -> Dict[str, Any]:
     """
-    Live implementation corresponding to the chosen old-alignment concept:
-
-    - the CURRENT forming 15m candle supplies the current close;
-    - the 5 candles BEFORE it supply the Turtle high/low.
-
-    This intentionally does not wait for the current 15m candle to close.
+    Strategy #2:
+    Direction is determined by breakout of the previous closed 15m candle.
     """
-    df = get_data("15m", TURTLE_LENGTH + 2)
-    if len(df) < TURTLE_LENGTH + 1:
-        raise RuntimeError("Not enough 15m candles for Turtle 5")
+    df = get_data("15m", 3)
+    if len(df) < 2:
+        raise RuntimeError("Not enough 15m candles")
 
     current = df.iloc[-1]
-    previous = df.iloc[-(TURTLE_LENGTH + 1):-1]
+    previous = df.iloc[-2]
 
     current_close = float(current["close"])
-    previous_high = float(previous["high"].max())
-    previous_low = float(previous["low"].min())
+    previous_high = float(previous["high"])
+    previous_low = float(previous["low"])
 
     direction: Optional[str] = None
     if current_close > previous_high:
@@ -886,7 +882,7 @@ def strong_signal(message):
         signal = direction if can_open else "NO TRADE"
 
         lines = [
-            "ETHUSDT TURTLE 5",
+            "ETHUSDT PREVIOUS 15M BREAKOUT",
             "",
             f"Сигнал: {signal}",
             f"Направление 15M: {direction or 'NONE'}",
@@ -1047,7 +1043,7 @@ if __name__ == "__main__":
         symbol=SYMBOL,
         market="Binance Futures",
         check_interval="Every 60 seconds",
-        strategy="Turtle 5 | current 15m direction + closed 1m entry",
+        strategy="Previous closed 15m breakout + closed 1m confirmation",
         margin=f"{POSITION_MARGIN_PCT}% of current equity",
         leverage=f"{LEVERAGE}x",
         stop=f"{INITIAL_STOP_PCT}%",
