@@ -203,6 +203,8 @@ def default_state() -> Dict[str, Any]:
         "last_reason": "Бот ещё не выполнил первую проверку",
         "checks_today": 0,
         "checks_day": utc_now().strftime("%Y-%m-%d"),
+        "last_completed_direction": "NONE",
+        "entry_lock_direction": "NONE",
     }
 
 
@@ -572,6 +574,8 @@ def finalize_trade(
         ])
     )
 
+    state["last_completed_direction"] = trade["side"]
+    state["entry_lock_direction"] = trade["side"]
     state["open_trade"] = None
     save_state(state)
 
@@ -693,6 +697,8 @@ def no_trade_reason(state, direction, confirmation):
         return f"Уже есть открытая сделка {t['side']} на стадии {t['stage']}"
     if int(state.get("trades_today", 0)) >= MAX_TRADES_PER_DAY:
         return f"Достигнут дневной лимит {MAX_TRADES_PER_DAY} сделок"
+    if direction == state.get("entry_lock_direction","NONE") and direction in {"LONG","SHORT"}:
+        return f"Повторный вход в тот же пробой {direction} запрещён до возврата направления в NONE"
     if direction is None:
         return (
             "Нет пробоя Turtle 5: текущая 15M цена находится "
@@ -712,6 +718,8 @@ def analyze_market(state: Dict[str, Any]) -> None:
     candle = snapshot["candle"]
     context = snapshot["context"]
     direction = snapshot["direction"]
+    if direction is None and state.get("entry_lock_direction") != "NONE":
+        state["entry_lock_direction"] = "NONE"
     one_minute_confirmation = snapshot["confirmation"]
     futures_price = snapshot["futures_price"]
 
@@ -785,6 +793,7 @@ def analyze_market(state: Dict[str, Any]) -> None:
     if (
         not state.get("open_trade")
         and direction in {"LONG", "SHORT"}
+        and direction != state.get("entry_lock_direction","NONE")
         and one_minute_confirmation
         and int(state["trades_today"]) < MAX_TRADES_PER_DAY
     ):
