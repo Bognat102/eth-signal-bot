@@ -73,10 +73,10 @@ LEVERAGE = 10.0
 TAKER_FEE_PCT = 0.045
 SLIPPAGE_PCT = 0.02
 
-INITIAL_STOP_PCT = 0.60
+INITIAL_STOP_PCT = 0.80
 TP1_PCT = 0.50
 TP2_PCT = 1.00
-TP3_PCT = 1.50
+TP3_PCT = 1.30
 
 TP1_CLOSE_FRACTION = 0.50
 TP2_CLOSE_FRACTION = 0.30
@@ -1007,10 +1007,10 @@ def startup_self_check() -> None:
         "check_every_60_seconds": SLEEP_SECONDS == 60,
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
-        "stop_0_60_percent": INITIAL_STOP_PCT == 0.60,
+        "stop_0_60_percent": INITIAL_STOP_PCT == 0.80,
         "tp1_0_50_percent": TP1_PCT == 0.50,
         "tp2_1_00_percent": TP2_PCT == 1.00,
-        "tp3_1_50_percent": TP3_PCT == 1.50,
+        "tp3_1_50_percent": TP3_PCT == 1.30,
         "tp_split_50_30_20": (
             TP1_CLOSE_FRACTION,
             TP2_CLOSE_FRACTION,
