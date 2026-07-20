@@ -1,11 +1,11 @@
 """
 main.py
 
-ETH Turtle 5 paper bot for Railway.
+ETH Previous 15M Breakout paper bot for Railway.
 
 This file intentionally contains BOTH:
 - the already-working Railway / Telegram / Binance Futures infrastructure pattern;
-- the full Turtle 5 trading logic.
+- the full Previous 15M Breakout trading logic.
 
 Only this one file needs to replace the current main.py in GitHub.
 
@@ -63,7 +63,7 @@ STATE_FILE = Path("state_ETHUSDT.json")
 
 
 # ============================================================================
-# V16 STRATEGY CONSTANTS — DO NOT CHANGE WITHOUT A NEW BACKTEST
+# STRATEGY CONSTANTS — DO NOT CHANGE WITHOUT A NEW BACKTEST
 # ============================================================================
 
 START_EQUITY_USDT = 1000.0
@@ -72,8 +72,6 @@ LEVERAGE = 10.0
 
 TAKER_FEE_PCT = 0.045
 SLIPPAGE_PCT = 0.02
-
-TURTLE_LENGTH = 5
 
 INITIAL_STOP_PCT = 0.60
 TP1_PCT = 0.50
@@ -276,11 +274,15 @@ def latest_closed_1m() -> pd.Series:
 def turtle_15m_context() -> Dict[str, Any]:
     """
     Strategy #2:
-    Direction is determined by breakout of the previous closed 15m candle.
+
+    - the CURRENT forming 15m candle supplies the current price;
+    - the ONE previous CLOSED 15m candle supplies the breakout high/low.
+
+    This intentionally does not wait for the current 15m candle to close.
     """
     df = get_data("15m", 3)
     if len(df) < 2:
-        raise RuntimeError("Not enough 15m candles")
+        raise RuntimeError("Not enough 15m candles for previous-candle breakout")
 
     current = df.iloc[-1]
     previous = df.iloc[-2]
@@ -414,9 +416,9 @@ def open_trade(
         "tp1": levels["tp1"],
         "tp2": levels["tp2"],
         "tp3": levels["tp3"],
-        "turtle_current_15m_close": context["current_close"],
-        "turtle_previous_high_5": context["previous_high"],
-        "turtle_previous_low_5": context["previous_low"],
+        "signal_current_15m_price": context["current_close"],
+        "signal_previous_15m_high": context["previous_high"],
+        "signal_previous_15m_low": context["previous_low"],
         "signal_1m_open": float(candle_1m["open"]),
         "signal_1m_close": float(candle_1m["close"]),
     }
@@ -443,9 +445,9 @@ def open_trade(
         tp2=f"{levels['tp2']:.6f} | close 30%",
         tp3=f"{levels['tp3']:.6f} | close 20%",
         entry_fee=f"{entry_fee:.6f} USDT",
-        turtle_15m_close=f"{context['current_close']:.6f}",
-        turtle_high_5=f"{context['previous_high']:.6f}",
-        turtle_low_5=f"{context['previous_low']:.6f}",
+        current_15m_price=f"{context['current_close']:.6f}",
+        previous_closed_15m_high=f"{context['previous_high']:.6f}",
+        previous_closed_15m_low=f"{context['previous_low']:.6f}",
         signal_1m=f"{float(candle_1m['open']):.6f} -> {float(candle_1m['close']):.6f}",
         mode="PAPER ONLY",
     )
@@ -697,8 +699,8 @@ def no_trade_reason(state, direction, confirmation):
         return f"Повторный вход в тот же пробой {direction} запрещён до возврата направления в NONE"
     if direction is None:
         return (
-            "Нет пробоя Turtle 5: текущая 15M цена находится "
-            "между максимумом и минимумом предыдущих 5 свечей"
+            "Нет пробоя предыдущей закрытой 15M свечи: текущая 15M цена находится "
+            "между High и Low предыдущей закрытой 15M свечи"
         )
     if not confirmation:
         if direction == "LONG":
@@ -749,8 +751,8 @@ def analyze_market(state: Dict[str, Any]) -> None:
             "one_minute_low": round(float(candle["low"]), 6),
             "one_minute_close": round(candle_close, 6),
             "current_15m_close": round(float(context["current_close"]), 6),
-            "turtle_high_5": round(float(context["previous_high"]), 6),
-            "turtle_low_5": round(float(context["previous_low"]), 6),
+            "previous_closed_15m_high": round(float(context["previous_high"]), 6),
+            "previous_closed_15m_low": round(float(context["previous_low"]), 6),
             "direction": direction or "NONE",
             "one_minute_confirmation": one_minute_confirmation,
             "futures_last_price": round(futures_price, 6),
@@ -775,8 +777,8 @@ def analyze_market(state: Dict[str, Any]) -> None:
         ),
         current_futures_price=f"{futures_price:.6f}",
         current_15m_close=f"{float(context['current_close']):.6f}",
-        turtle_high_5=f"{float(context['previous_high']):.6f}",
-        turtle_low_5=f"{float(context['previous_low']):.6f}",
+        previous_closed_15m_high=f"{float(context['previous_high']):.6f}",
+        previous_closed_15m_low=f"{float(context['previous_low']):.6f}",
         direction=direction or "NONE",
         one_minute_confirmation=one_minute_confirmation,
         open_trade=bool(state.get("open_trade")),
@@ -844,7 +846,7 @@ def auto_check() -> None:
 def start(message):
     bot.reply_to(
         message,
-        "ETH Turtle 5 paper bot работает.\n"
+        "ETH Previous 15M Breakout paper bot работает.\n"
         "Рынок: Binance Futures\n"
         "Проверка: каждые 60 секунд\n"
         "Команды:\n"
@@ -876,6 +878,7 @@ def strong_signal(message):
         can_open = (
             not state.get("open_trade")
             and direction in {"LONG", "SHORT"}
+            and direction != state.get("entry_lock_direction", "NONE")
             and confirmation
             and int(state.get("trades_today", 0)) < MAX_TRADES_PER_DAY
         )
@@ -888,8 +891,8 @@ def strong_signal(message):
             f"Направление 15M: {direction or 'NONE'}",
             f"Подтверждение 1M: {'ЕСТЬ' if confirmation else 'НЕТ'}",
             f"Цена Futures: {futures_price:.2f} USDT",
-            f"Turtle High 5: {float(context['previous_high']):.2f}",
-            f"Turtle Low 5: {float(context['previous_low']):.2f}",
+            f"High предыдущей закрытой 15M: {float(context['previous_high']):.2f}",
+            f"Low предыдущей закрытой 15M: {float(context['previous_low']):.2f}",
             f"Текущая 15M цена: {float(context['current_close']):.2f}",
             f"Закрытая 1M свеча: {float(candle['open']):.2f} → {float(candle['close']):.2f}",
             "",
@@ -1002,7 +1005,6 @@ def startup_self_check() -> None:
     checks = {
         "symbol_is_eth_futures": SYMBOL == "ETH/USDT:USDT",
         "check_every_60_seconds": SLEEP_SECONDS == 60,
-        "turtle_length_5": TURTLE_LENGTH == 5,
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
         "stop_0_60_percent": INITIAL_STOP_PCT == 0.60,
