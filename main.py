@@ -75,7 +75,7 @@ SLIPPAGE_PCT = 0.02
 
 TURTLE_LENGTH = 5
 
-INITIAL_STOP_PCT = 0.60
+INITIAL_STOP_PCT = 0.90
 TP1_PCT = 0.40
 TP2_PCT = 0.80
 TP3_PCT = 1.20
@@ -1151,7 +1151,7 @@ def startup_self_check() -> None:
         "turtle_length_5": TURTLE_LENGTH == 5,
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
-        "stop_0_60_percent": INITIAL_STOP_PCT == 0.60,
+        "stop_0_60_percent": INITIAL_STOP_PCT == 0.90,
         "tp1_0_40_percent": TP1_PCT == 0.40,
         "tp2_0_80_percent": TP2_PCT == 0.80,
         "tp3_1_20_percent": TP3_PCT == 1.20,
