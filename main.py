@@ -75,16 +75,26 @@ SLIPPAGE_PCT = 0.02
 
 TURTLE_LENGTH = 5
 
-INITIAL_STOP_PCT = 0.80
+INITIAL_STOP_PCT = 0.60
 TP1_PCT = 0.50
 TP2_PCT = 1.00
-TP3_PCT = 1.30
+TP3_PCT = 1.50
 
 TP1_CLOSE_FRACTION = 0.50
 TP2_CLOSE_FRACTION = 0.30
 TP3_CLOSE_FRACTION = 0.20
 
 MAX_TRADES_PER_DAY = 40
+
+# ============================================================================
+# STRATEGY 3 — 1M ENTRY QUALITY FILTERS
+# Only the entry confirmation is changed. TP/SL, sizing and trade management
+# remain exactly the same as in the working Turtle 5 version.
+# ============================================================================
+
+MIN_BODY_TO_RANGE_RATIO = 0.55
+MAX_CLOSE_FROM_CANDLE_EDGE_RATIO = 0.25
+MAX_ENTRY_DISTANCE_FROM_BREAKOUT_PCT = 0.30
 
 
 # ============================================================================
@@ -671,33 +681,146 @@ def manage_open_trade(state: Dict[str, Any], candle: pd.Series) -> None:
 # MARKET ANALYSIS
 # ============================================================================
 
+def evaluate_entry_confirmation(
+    direction: Optional[str],
+    candle: pd.Series,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Strategy 3 confirmation on the latest CLOSED 1m candle.
+
+    LONG requires:
+    - candle closes above Turtle High 5;
+    - bullish candle;
+    - body is at least 55% of the full candle range;
+    - close is within the upper 25% of the candle;
+    - close is no farther than 0.30% beyond the breakout level.
+
+    SHORT uses the mirrored rules.
+    """
+    candle_open = float(candle["open"])
+    candle_high = float(candle["high"])
+    candle_low = float(candle["low"])
+    candle_close = float(candle["close"])
+
+    candle_range = candle_high - candle_low
+    body = abs(candle_close - candle_open)
+    body_ratio = body / candle_range if candle_range > 0 else 0.0
+
+    result = {
+        "confirmed": False,
+        "reason": "Нет направления Turtle 5",
+        "breakout_level": None,
+        "body_ratio": body_ratio,
+        "close_edge_ratio": None,
+        "distance_pct": None,
+    }
+
+    if direction not in {"LONG", "SHORT"}:
+        return result
+
+    breakout_level = (
+        float(context["previous_high"])
+        if direction == "LONG"
+        else float(context["previous_low"])
+    )
+    result["breakout_level"] = breakout_level
+
+    if candle_range <= 0:
+        result["reason"] = "Закрытая 1M свеча имеет нулевой диапазон"
+        return result
+
+    if direction == "LONG":
+        close_edge_ratio = (candle_high - candle_close) / candle_range
+        distance_pct = (candle_close / breakout_level - 1.0) * 100.0
+        result["close_edge_ratio"] = close_edge_ratio
+        result["distance_pct"] = distance_pct
+
+        if candle_close <= breakout_level:
+            result["reason"] = "1M свеча не закрылась выше уровня Turtle High 5"
+            return result
+        if candle_close <= candle_open:
+            result["reason"] = "1M свеча закрылась выше уровня, но она не бычья"
+            return result
+        if body_ratio < MIN_BODY_TO_RANGE_RATIO:
+            result["reason"] = (
+                f"Тело 1M свечи слишком маленькое: {body_ratio * 100:.1f}% "
+                f"диапазона, нужно минимум {MIN_BODY_TO_RANGE_RATIO * 100:.0f}%"
+            )
+            return result
+        if close_edge_ratio > MAX_CLOSE_FROM_CANDLE_EDGE_RATIO:
+            result["reason"] = (
+                "Закрытие 1M свечи находится недостаточно близко к её максимуму"
+            )
+            return result
+        if distance_pct > MAX_ENTRY_DISTANCE_FROM_BREAKOUT_PCT:
+            result["reason"] = (
+                f"Поздний LONG: свеча закрылась на {distance_pct:.3f}% выше уровня, "
+                f"максимум {MAX_ENTRY_DISTANCE_FROM_BREAKOUT_PCT:.2f}%"
+            )
+            return result
+
+    else:
+        close_edge_ratio = (candle_close - candle_low) / candle_range
+        distance_pct = (breakout_level / candle_close - 1.0) * 100.0
+        result["close_edge_ratio"] = close_edge_ratio
+        result["distance_pct"] = distance_pct
+
+        if candle_close >= breakout_level:
+            result["reason"] = "1M свеча не закрылась ниже уровня Turtle Low 5"
+            return result
+        if candle_close >= candle_open:
+            result["reason"] = "1M свеча закрылась ниже уровня, но она не медвежья"
+            return result
+        if body_ratio < MIN_BODY_TO_RANGE_RATIO:
+            result["reason"] = (
+                f"Тело 1M свечи слишком маленькое: {body_ratio * 100:.1f}% "
+                f"диапазона, нужно минимум {MIN_BODY_TO_RANGE_RATIO * 100:.0f}%"
+            )
+            return result
+        if close_edge_ratio > MAX_CLOSE_FROM_CANDLE_EDGE_RATIO:
+            result["reason"] = (
+                "Закрытие 1M свечи находится недостаточно близко к её минимуму"
+            )
+            return result
+        if distance_pct > MAX_ENTRY_DISTANCE_FROM_BREAKOUT_PCT:
+            result["reason"] = (
+                f"Поздний SHORT: свеча закрылась на {distance_pct:.3f}% ниже уровня, "
+                f"максимум {MAX_ENTRY_DISTANCE_FROM_BREAKOUT_PCT:.2f}%"
+            )
+            return result
+
+    result["confirmed"] = True
+    result["reason"] = "Качественная закрытая 1M свеча подтвердила пробой"
+    return result
+
+
 def market_snapshot() -> Dict[str, Any]:
     candle = latest_closed_1m()
     context = turtle_15m_context()
     direction = context["direction"]
-    candle_open = float(candle["open"])
-    candle_close = float(candle["close"])
-    confirmation = (
-        direction == "LONG" and candle_close > candle_open
-    ) or (
-        direction == "SHORT" and candle_close < candle_open
+    confirmation_details = evaluate_entry_confirmation(
+        direction,
+        candle,
+        context,
     )
     return {
         "candle": candle,
         "context": context,
         "direction": direction,
-        "confirmation": confirmation,
+        "confirmation": bool(confirmation_details["confirmed"]),
+        "confirmation_details": confirmation_details,
         "futures_price": current_futures_price(),
     }
 
 
-def no_trade_reason(state, direction, confirmation):
+def no_trade_reason(state, direction, confirmation, confirmation_details=None):
     if state.get("open_trade"):
         t = state["open_trade"]
         return f"Уже есть открытая сделка {t['side']} на стадии {t['stage']}"
     if int(state.get("trades_today", 0)) >= MAX_TRADES_PER_DAY:
         return f"Достигнут дневной лимит {MAX_TRADES_PER_DAY} сделок"
-    if direction == state.get("entry_lock_direction","NONE") and direction in {"LONG","SHORT"}:
+    if direction == state.get("entry_lock_direction", "NONE") and direction in {"LONG", "SHORT"}:
         return f"Повторный вход в тот же пробой {direction} запрещён до возврата направления в NONE"
     if direction is None:
         return (
@@ -705,9 +828,9 @@ def no_trade_reason(state, direction, confirmation):
             "между максимумом и минимумом предыдущих 5 свечей"
         )
     if not confirmation:
-        if direction == "LONG":
-            return "Есть направление LONG, но последняя закрытая 1M свеча не бычья"
-        return "Есть направление SHORT, но последняя закрытая 1M свеча не медвежья"
+        if confirmation_details:
+            return str(confirmation_details.get("reason") or "Нет качественного подтверждения 1M")
+        return "Нет качественного подтверждения пробоя закрытой 1M свечой"
     return "Все условия входа выполнены"
 
 
@@ -721,6 +844,7 @@ def analyze_market(state: Dict[str, Any]) -> None:
     if direction is None and state.get("entry_lock_direction") != "NONE":
         state["entry_lock_direction"] = "NONE"
     one_minute_confirmation = snapshot["confirmation"]
+    confirmation_details = snapshot["confirmation_details"]
     futures_price = snapshot["futures_price"]
 
     candle_open_time = int(candle["time"])
@@ -733,7 +857,9 @@ def analyze_market(state: Dict[str, Any]) -> None:
 
     candle_open = float(candle["open"])
     candle_close = float(candle["close"])
-    reason = no_trade_reason(state, direction, one_minute_confirmation)
+    reason = no_trade_reason(
+        state, direction, one_minute_confirmation, confirmation_details
+    )
 
     state["last_check_time"] = now_str()
     state["last_direction"] = direction or "NONE"
@@ -783,6 +909,16 @@ def analyze_market(state: Dict[str, Any]) -> None:
         turtle_low_5=f"{float(context['previous_low']):.6f}",
         direction=direction or "NONE",
         one_minute_confirmation=one_minute_confirmation,
+        confirmation_reason=confirmation_details["reason"],
+        body_to_range=f"{float(confirmation_details['body_ratio']) * 100:.1f}%",
+        close_from_edge=(
+            "-" if confirmation_details["close_edge_ratio"] is None
+            else f"{float(confirmation_details['close_edge_ratio']) * 100:.1f}%"
+        ),
+        breakout_distance=(
+            "-" if confirmation_details["distance_pct"] is None
+            else f"{float(confirmation_details['distance_pct']):.3f}%"
+        ),
         open_trade=bool(state.get("open_trade")),
         trades_today=f"{int(state['trades_today'])}/{MAX_TRADES_PER_DAY}",
         equity=f"{float(state['equity']):.6f} USDT",
@@ -874,12 +1010,16 @@ def strong_signal(message):
         context = snap["context"]
         direction = snap["direction"]
         confirmation = snap["confirmation"]
+        confirmation_details = snap["confirmation_details"]
         futures_price = snap["futures_price"]
-        reason = no_trade_reason(state, direction, confirmation)
+        reason = no_trade_reason(
+            state, direction, confirmation, confirmation_details
+        )
 
         can_open = (
             not state.get("open_trade")
             and direction in {"LONG", "SHORT"}
+            and direction != state.get("entry_lock_direction", "NONE")
             and confirmation
             and int(state.get("trades_today", 0)) < MAX_TRADES_PER_DAY
         )
@@ -896,6 +1036,8 @@ def strong_signal(message):
             f"Turtle Low 5: {float(context['previous_low']):.2f}",
             f"Текущая 15M цена: {float(context['current_close']):.2f}",
             f"Закрытая 1M свеча: {float(candle['open']):.2f} → {float(candle['close']):.2f}",
+            f"Тело свечи: {float(confirmation_details['body_ratio']) * 100:.1f}% диапазона",
+            f"Качество 1M: {confirmation_details['reason']}",
             "",
             f"Открытая сделка: {'ДА' if state.get('open_trade') else 'НЕТ'}",
             f"Сделок сегодня: {int(state.get('trades_today', 0))}/{MAX_TRADES_PER_DAY}",
@@ -1009,10 +1151,10 @@ def startup_self_check() -> None:
         "turtle_length_5": TURTLE_LENGTH == 5,
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
-        "stop_0_60_percent": INITIAL_STOP_PCT == 0.80,
+        "stop_0_60_percent": INITIAL_STOP_PCT == 0.60,
         "tp1_0_50_percent": TP1_PCT == 0.50,
         "tp2_1_00_percent": TP2_PCT == 1.00,
-        "tp3_1_50_percent": TP3_PCT == 1.30,
+        "tp3_1_50_percent": TP3_PCT == 1.50,
         "tp_split_50_30_20": (
             TP1_CLOSE_FRACTION,
             TP2_CLOSE_FRACTION,
@@ -1047,7 +1189,7 @@ if __name__ == "__main__":
         symbol=SYMBOL,
         market="Binance Futures",
         check_interval="Every 60 seconds",
-        strategy="Turtle 5 | current 15m direction + closed 1m entry",
+        strategy="Turtle 5 Strategy 3 | quality-filtered closed 1m entry",
         margin=f"{POSITION_MARGIN_PCT}% of current equity",
         leverage=f"{LEVERAGE}x",
         stop=f"{INITIAL_STOP_PCT}%",
