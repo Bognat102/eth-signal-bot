@@ -76,13 +76,15 @@ SLIPPAGE_PCT = 0.02
 TURTLE_LENGTH = 5
 
 INITIAL_STOP_PCT = 0.90
-TP1_PCT = 0.44
-TP2_PCT = 0.80
-TP3_PCT = 1.20
+TP1_PCT = 0.15
+TP2_PCT = 0.44
+TP3_PCT = 0.80
+TP4_PCT = 1.20
 
-TP1_CLOSE_FRACTION = 0.50
+TP1_CLOSE_FRACTION = 0.20
 TP2_CLOSE_FRACTION = 0.30
-TP3_CLOSE_FRACTION = 0.20
+TP3_CLOSE_FRACTION = 0.30
+TP4_CLOSE_FRACTION = 0.20
 
 MAX_TRADES_PER_DAY = 40
 
@@ -167,31 +169,22 @@ def make_levels(side: str, entry: float):
             "tp1": entry * (1 + TP1_PCT / 100.0),
             "tp2": entry * (1 + TP2_PCT / 100.0),
             "tp3": entry * (1 + TP3_PCT / 100.0),
+            "tp4": entry * (1 + TP4_PCT / 100.0),
         }
     return {
         "stop": entry * (1 + INITIAL_STOP_PCT / 100.0),
         "tp1": entry * (1 - TP1_PCT / 100.0),
         "tp2": entry * (1 - TP2_PCT / 100.0),
         "tp3": entry * (1 - TP3_PCT / 100.0),
+        "tp4": entry * (1 - TP4_PCT / 100.0),
     }
 
 
 def remaining_position_break_even(side: str, entry_exec: float) -> float:
-    """
-    Break-even for ONLY the remaining position after TP1.
-
-    The already-realized TP1 profit is preserved.
-    The remaining position covers its own future exit fee and modeled slippage.
-    """
-    fee_rate = TAKER_FEE_PCT / 100.0
-    slip_rate = SLIPPAGE_PCT / 100.0
-
-    if side == "LONG":
-        target_exec = entry_exec / (1 - fee_rate)
-        return target_exec / (1 - slip_rate)
-
-    target_exec = entry_exec / (1 + fee_rate)
-    return target_exec / (1 + slip_rate)
+    """Return the exact entry price used as break-even after TP1."""
+    if side not in {"LONG", "SHORT"}:
+        raise ValueError(f"Unsupported side: {side}")
+    return entry_exec
 
 
 # ============================================================================
@@ -328,7 +321,7 @@ def update_funding(trade: Dict[str, Any], event_time_ms: int) -> None:
     """
     Add funding only for the interval not processed before.
 
-    This prevents double-counting after TP1 and TP2.
+    This prevents double-counting after TP1, TP2 and TP3.
     """
     last_time = int(trade.get("last_funding_time_ms", trade["entry_time_ms"]))
     if event_time_ms <= last_time:
@@ -385,6 +378,7 @@ def save_trade_event(trade: Dict[str, Any], event: str, event_pnl: Any = "") -> 
             "tp1": round(float(trade["tp1"]), 6),
             "tp2": round(float(trade["tp2"]), 6),
             "tp3": round(float(trade["tp3"]), 6),
+            "tp4": round(float(trade["tp4"]), 6),
             "qty_initial": round(float(trade["qty_initial"]), 8),
             "qty_remaining": round(float(trade["qty_remaining"]), 8),
             "margin_usdt": round(float(trade["margin"]), 6),
@@ -463,6 +457,7 @@ def open_trade(
         "tp1": levels["tp1"],
         "tp2": levels["tp2"],
         "tp3": levels["tp3"],
+        "tp4": levels["tp4"],
         "turtle_current_15m_close": context["current_close"],
         "turtle_previous_high_5": context["previous_high"],
         "turtle_previous_low_5": context["previous_low"],
@@ -488,9 +483,10 @@ def open_trade(
         notional=f"{notional:.6f} USDT",
         qty=f"{qty:.8f} ETH",
         stop=f"{levels['stop']:.6f}",
-        tp1=f"{levels['tp1']:.6f} | close 50%",
+        tp1=f"{levels['tp1']:.6f} | close 20%",
         tp2=f"{levels['tp2']:.6f} | close 30%",
-        tp3=f"{levels['tp3']:.6f} | close 20%",
+        tp3=f"{levels['tp3']:.6f} | close 30%",
+        tp4=f"{levels['tp4']:.6f} | close 20%",
         entry_fee=f"{entry_fee:.6f} USDT",
         turtle_15m_close=f"{context['current_close']:.6f}",
         turtle_high_5=f"{context['previous_high']:.6f}",
@@ -506,9 +502,10 @@ def open_trade(
             f"ETHUSDT {side}",
             f"Entry: {entry_exec:.2f}",
             f"Stop: {levels['stop']:.2f}",
-            f"TP1: {levels['tp1']:.2f} (50%)",
+            f"TP1: {levels['tp1']:.2f} (20%)",
             f"TP2: {levels['tp2']:.2f} (30%)",
-            f"TP3: {levels['tp3']:.2f} (20%)",
+            f"TP3: {levels['tp3']:.2f} (30%)",
+            f"TP4: {levels['tp4']:.2f} (20%)",
             f"Margin: {margin:.2f} USDT",
             f"Leverage: {LEVERAGE:.0f}x",
             "Paper mode",
@@ -644,6 +641,7 @@ def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> No
     tp1 = float(trade["tp1"])
     tp2 = float(trade["tp2"])
     tp3 = float(trade["tp3"])
+    tp4 = float(trade["tp4"])
     stage = int(trade["stage"])
 
     if stage == 0:
@@ -676,10 +674,10 @@ def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> No
             log_block(
                 "STOP MOVED AFTER TP1",
                 side=side,
-                closed_position="50%",
-                remaining_position="50%",
+                closed_position="20%",
+                remaining_position="80%",
                 new_stop=f"{float(trade['stop']):.6f}",
-                rule="Remaining 50% has its own cost-covered break-even",
+                rule="Remaining 80% stop is moved to the exact entry price",
                 tp1_profit="Preserved",
             )
             return
@@ -707,7 +705,7 @@ def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> No
             save_state(state)
             return
 
-    else:
+    elif stage == 2:
         stop_hit = low <= stop if side == "LONG" else high >= stop
         tp3_hit = high >= tp3 if side == "LONG" else low <= tp3
 
@@ -716,7 +714,30 @@ def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> No
             return
 
         if tp3_hit:
-            finalize_trade(state, side, tp3, "TP3_HIT", event_time_ms)
+            close_part(
+                state,
+                side,
+                tp3,
+                TP3_CLOSE_FRACTION,
+                "TP3_HIT",
+                event_time_ms,
+            )
+            trade = get_open_trade(state, side)
+            trade["stage"] = 3
+            # Stop deliberately remains at the TP1 break-even level.
+            save_state(state)
+            return
+
+    else:
+        stop_hit = low <= stop if side == "LONG" else high >= stop
+        tp4_hit = high >= tp4 if side == "LONG" else low <= tp4
+
+        if stop_hit:
+            finalize_trade(state, side, stop, "TP3_BE", event_time_ms)
+            return
+
+        if tp4_hit:
+            finalize_trade(state, side, tp4, "TP4_HIT", event_time_ms)
             return
 
 
@@ -1116,9 +1137,10 @@ def strong_signal(message):
                 "УСЛОВИЯ ПОТЕНЦИАЛЬНОЙ СДЕЛКИ",
                 f"Вход: {entry:.2f}",
                 f"Стоп: {levels['stop']:.2f}",
-                f"TP1: {levels['tp1']:.2f} — закрыть 50%",
+                f"TP1: {levels['tp1']:.2f} — закрыть 20%",
                 f"TP2: {levels['tp2']:.2f} — закрыть 30%",
-                f"TP3: {levels['tp3']:.2f} — закрыть 20%",
+                f"TP3: {levels['tp3']:.2f} — закрыть 30%",
+                f"TP4: {levels['tp4']:.2f} — закрыть 20%",
                 f"Маржа: {margin:.2f} USDT",
                 f"Номинал: {notional:.2f} USDT",
                 f"Количество: {qty:.6f} ETH",
@@ -1156,8 +1178,9 @@ def status(message):
 
     stage_names = {
         0: "до TP1",
-        1: "TP1 выполнен, осталось 50%",
-        2: "TP2 выполнен, осталось 20%",
+        1: "TP1 выполнен, осталось 80%",
+        2: "TP2 выполнен, осталось 50%",
+        3: "TP3 выполнен, осталось 20%",
     }
 
     for label, trade in (("LONG", long_trade), ("SHORT", short_trade)):
@@ -1172,6 +1195,7 @@ def status(message):
             f"TP1: {float(trade['tp1']):.2f}",
             f"TP2: {float(trade['tp2']):.2f}",
             f"TP3: {float(trade['tp3']):.2f}",
+            f"TP4: {float(trade['tp4']):.2f}",
             f"Остаток позиции: {float(trade['qty_remaining']):.6f} ETH",
             f"Зафиксированный PnL: {float(trade['realized_pnl']):.4f} USDT",
             f"Комиссии: {float(trade['fees_paid']):.4f} USDT",
@@ -1216,14 +1240,16 @@ def startup_self_check() -> None:
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
         "stop_0_90_percent": INITIAL_STOP_PCT == 0.90,
-        "tp1_0_40_percent": TP1_PCT == 0.44,
-        "tp2_0_80_percent": TP2_PCT == 0.80,
-        "tp3_1_20_percent": TP3_PCT == 1.20,
-        "tp_split_50_30_20": (
+        "tp1_0_15_percent": TP1_PCT == 0.15,
+        "tp2_0_44_percent": TP2_PCT == 0.44,
+        "tp3_0_80_percent": TP3_PCT == 0.80,
+        "tp4_1_20_percent": TP4_PCT == 1.20,
+        "tp_split_20_30_30_20": (
             TP1_CLOSE_FRACTION,
             TP2_CLOSE_FRACTION,
             TP3_CLOSE_FRACTION,
-        ) == (0.50, 0.30, 0.20),
+            TP4_CLOSE_FRACTION,
+        ) == (0.20, 0.30, 0.30, 0.20),
         "dual_position_state": (
             "open_long" in default_state()
             and "open_short" in default_state()
@@ -1262,9 +1288,10 @@ if __name__ == "__main__":
         margin=f"{POSITION_MARGIN_PCT}% of current equity",
         leverage=f"{LEVERAGE}x",
         stop=f"{INITIAL_STOP_PCT}%",
-        tp1=f"{TP1_PCT}% | close 50%",
+        tp1=f"{TP1_PCT}% | close 20%",
         tp2=f"{TP2_PCT}% | close 30%",
-        tp3=f"{TP3_PCT}% | close 20%",
+        tp3=f"{TP3_PCT}% | close 30%",
+        tp4=f"{TP4_PCT}% | close 20%",
         live_trading=LIVE_TRADING_ENABLED,
         mode="PAPER ONLY",
     )
