@@ -75,11 +75,11 @@ SLIPPAGE_PCT = 0.02
 
 TURTLE_LENGTH = 5
 
-INITIAL_STOP_PCT = 0.90
-TP1_PCT = 0.15
-TP2_PCT = 0.44
-TP3_PCT = 0.80
-TP4_PCT = 1.20
+INITIAL_STOP_PCT = 2.00
+TP1_PCT = 0.30
+TP2_PCT = 0.60
+TP3_PCT = 1.00
+TP4_PCT = 1.50
 
 TP1_CLOSE_FRACTION = 0.20
 TP2_CLOSE_FRACTION = 0.30
@@ -1239,11 +1239,11 @@ def startup_self_check() -> None:
         "turtle_length_5": TURTLE_LENGTH == 5,
         "margin_5_percent": POSITION_MARGIN_PCT == 5.0,
         "leverage_10x": LEVERAGE == 10.0,
-        "stop_0_90_percent": INITIAL_STOP_PCT == 0.90,
-        "tp1_0_15_percent": TP1_PCT == 0.15,
-        "tp2_0_44_percent": TP2_PCT == 0.44,
-        "tp3_0_80_percent": TP3_PCT == 0.80,
-        "tp4_1_20_percent": TP4_PCT == 1.20,
+        "stop_2_00_percent": INITIAL_STOP_PCT == 2.00,
+        "tp1_0_30_percent": TP1_PCT == 0.30,
+        "tp2_0_60_percent": TP2_PCT == 0.60,
+        "tp3_1_00_percent": TP3_PCT == 1.00,
+        "tp4_1_50_percent": TP4_PCT == 1.50,
         "tp_split_20_30_30_20": (
             TP1_CLOSE_FRACTION,
             TP2_CLOSE_FRACTION,
