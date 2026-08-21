@@ -5,7 +5,7 @@ ETH Turtle 5 paper bot for Railway.
 
 This file intentionally contains BOTH:
 - the already-working Railway / Telegram / Binance Futures infrastructure pattern;
-- the full Turtle 5 trading logic.
+- the full Turtle 5 trading logic (LONG-only, up to two simultaneous LONG positions).
 
 Only this one file needs to replace the current main.py in GitHub.
 
@@ -194,8 +194,8 @@ def remaining_position_break_even(side: str, entry_exec: float) -> float:
 def default_state() -> Dict[str, Any]:
     return {
         "equity": START_EQUITY_USDT,
-        "open_long": None,
-        "open_short": None,
+        "open_long_1": None,
+        "open_long_2": None,
         "trades_today": 0,
         "trades_day": utc_now().strftime("%Y-%m-%d"),
         "last_processed_1m_open_time": None,
@@ -209,8 +209,8 @@ def default_state() -> Dict[str, Any]:
         "checks_day": utc_now().strftime("%Y-%m-%d"),
         "last_completed_direction": "NONE",
         "entry_lock_long": False,
-        "entry_lock_short": False,
     }
+
 
 def load_state() -> Dict[str, Any]:
     if not STATE_FILE.exists():
@@ -220,8 +220,8 @@ def load_state() -> Dict[str, Any]:
         loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         state = default_state()
 
-        # Read only fields used by the new two-position state model.
-        # Legacy open_trade / entry_lock_direction are intentionally ignored:
+        # Read only fields used by the LONG-only two-position state model.
+        # Legacy open_long/open_short/open_trade fields are intentionally ignored:
         # after deployment the bot starts without carrying an old open position.
         for key in state:
             if key in loaded:
@@ -391,28 +391,40 @@ def save_trade_event(trade: Dict[str, Any], event: str, event_pnl: Any = "") -> 
     )
 
 
-def trade_state_key(side: str) -> str:
-    if side == "LONG":
-        return "open_long"
-    if side == "SHORT":
-        return "open_short"
-    raise ValueError(f"Unsupported side: {side}")
+LONG_POSITION_KEYS = ("open_long_1", "open_long_2")
 
 
-def get_open_trade(state: Dict[str, Any], side: str) -> Optional[Dict[str, Any]]:
-    return state.get(trade_state_key(side))
+def get_open_trade(state: Dict[str, Any], position_key: str) -> Optional[Dict[str, Any]]:
+    if position_key not in LONG_POSITION_KEYS:
+        raise ValueError(f"Unsupported LONG position key: {position_key}")
+    return state.get(position_key)
+
+
+def open_long_count(state: Dict[str, Any]) -> int:
+    return sum(1 for key in LONG_POSITION_KEYS if state.get(key))
+
+
+def first_free_long_key(state: Dict[str, Any]) -> Optional[str]:
+    for key in LONG_POSITION_KEYS:
+        if not state.get(key):
+            return key
+    return None
 
 
 def has_any_open_trade(state: Dict[str, Any]) -> bool:
-    return bool(state.get("open_long") or state.get("open_short"))
+    return open_long_count(state) > 0
 
 
 def is_entry_locked(state: Dict[str, Any], side: str) -> bool:
-    return bool(state.get("entry_lock_long" if side == "LONG" else "entry_lock_short", False))
+    if side != "LONG":
+        return True
+    return bool(state.get("entry_lock_long", False))
 
 
 def set_entry_lock(state: Dict[str, Any], side: str, value: bool) -> None:
-    state["entry_lock_long" if side == "LONG" else "entry_lock_short"] = bool(value)
+    if side != "LONG":
+        raise ValueError(f"SHORT trading is disabled: {side}")
+    state["entry_lock_long"] = bool(value)
 
 
 def open_trade(
@@ -422,9 +434,12 @@ def open_trade(
     candle_1m: pd.Series,
     context: Dict[str, Any],
 ) -> None:
-    state_key = trade_state_key(side)
-    if state.get(state_key):
-        raise RuntimeError(f"An open {side} trade already exists")
+    if side != "LONG":
+        raise RuntimeError("SHORT trading is disabled; only LONG entries are allowed")
+
+    state_key = first_free_long_key(state)
+    if state_key is None:
+        raise RuntimeError("Two LONG trades are already open")
 
     equity = float(state["equity"])
     entry_exec = execution_price(raw_entry, side, True)
@@ -438,6 +453,7 @@ def open_trade(
         "status": "OPEN",
         "stage": 0,
         "side": side,
+        "position_key": state_key,
         "entry_time": now_str(),
         "entry_time_ms": now_ms,
         "last_funding_time_ms": now_ms,
@@ -492,14 +508,17 @@ def open_trade(
         turtle_high_5=f"{context['previous_high']:.6f}",
         turtle_low_5=f"{context['previous_low']:.6f}",
         signal_1m=f"{float(candle_1m['open']):.6f} -> {float(candle_1m['close']):.6f}",
-        open_long=bool(state.get("open_long")),
-        open_short=bool(state.get("open_short")),
+        long_position_slot=state_key,
+        open_long_1=bool(state.get("open_long_1")),
+        open_long_2=bool(state.get("open_long_2")),
+        open_long_count=open_long_count(state),
         mode="PAPER ONLY",
     )
 
     send_telegram(
         "\n".join([
             f"ETHUSDT {side}",
+            f"Position: {'LONG #1' if state_key == 'open_long_1' else 'LONG #2'}",
             f"Entry: {entry_exec:.2f}",
             f"Stop: {levels['stop']:.2f}",
             f"TP1: {levels['tp1']:.2f} (20%)",
@@ -514,16 +533,17 @@ def open_trade(
 
 def close_part(
     state: Dict[str, Any],
-    side: str,
+    position_key: str,
     raw_exit: float,
     fraction: float,
     event: str,
     event_time_ms: int,
 ) -> None:
-    trade = get_open_trade(state, side)
+    trade = get_open_trade(state, position_key)
     if not trade:
-        raise RuntimeError(f"No open {side} trade to partially close")
+        raise RuntimeError(f"No open LONG trade in {position_key} to partially close")
 
+    side = "LONG"
     update_funding(trade, event_time_ms)
 
     qty = min(
@@ -564,16 +584,16 @@ def close_part(
 
 def finalize_trade(
     state: Dict[str, Any],
-    side: str,
+    position_key: str,
     raw_exit: float,
     status: str,
     event_time_ms: int,
 ) -> None:
-    state_key = trade_state_key(side)
-    trade = state.get(state_key)
+    trade = get_open_trade(state, position_key)
     if not trade:
-        raise RuntimeError(f"No open {side} trade to finalize")
+        raise RuntimeError(f"No open LONG trade in {position_key} to finalize")
 
+    side = "LONG"
     update_funding(trade, event_time_ms)
 
     qty = float(trade["qty_remaining"])
@@ -625,14 +645,15 @@ def finalize_trade(
 
     state["last_completed_direction"] = side
     set_entry_lock(state, side, True)
-    state[state_key] = None
+    state[position_key] = None
     save_state(state)
 
-def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> None:
-    trade = get_open_trade(state, side)
+def manage_open_trade(state: Dict[str, Any], position_key: str, candle: pd.Series) -> None:
+    trade = get_open_trade(state, position_key)
     if not trade:
         return
 
+    side = "LONG"
     high = float(candle["high"])
     low = float(candle["low"])
     event_time_ms = int(candle["time"]) + 1 * 60 * 1000
@@ -651,19 +672,19 @@ def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> No
         # Existing conservative rule: when both levels are inside one closed
         # 1m candle and the intraminute order is unknown, count the stop first.
         if stop_hit:
-            finalize_trade(state, side, stop, "STOP", event_time_ms)
+            finalize_trade(state, position_key, stop, "STOP", event_time_ms)
             return
 
         if tp1_hit:
             close_part(
                 state,
-                side,
+                position_key,
                 tp1,
                 TP1_CLOSE_FRACTION,
                 "TP1_HIT",
                 event_time_ms,
             )
-            trade = get_open_trade(state, side)
+            trade = get_open_trade(state, position_key)
             trade["stage"] = 1
             trade["stop"] = remaining_position_break_even(
                 side,
@@ -687,19 +708,19 @@ def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> No
         tp2_hit = high >= tp2 if side == "LONG" else low <= tp2
 
         if stop_hit:
-            finalize_trade(state, side, stop, "TP1_BE", event_time_ms)
+            finalize_trade(state, position_key, stop, "TP1_BE", event_time_ms)
             return
 
         if tp2_hit:
             close_part(
                 state,
-                side,
+                position_key,
                 tp2,
                 TP2_CLOSE_FRACTION,
                 "TP2_HIT",
                 event_time_ms,
             )
-            trade = get_open_trade(state, side)
+            trade = get_open_trade(state, position_key)
             trade["stage"] = 2
             # Stop deliberately remains at the TP1 break-even level.
             save_state(state)
@@ -710,19 +731,19 @@ def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> No
         tp3_hit = high >= tp3 if side == "LONG" else low <= tp3
 
         if stop_hit:
-            finalize_trade(state, side, stop, "TP2_BE", event_time_ms)
+            finalize_trade(state, position_key, stop, "TP2_BE", event_time_ms)
             return
 
         if tp3_hit:
             close_part(
                 state,
-                side,
+                position_key,
                 tp3,
                 TP3_CLOSE_FRACTION,
                 "TP3_HIT",
                 event_time_ms,
             )
-            trade = get_open_trade(state, side)
+            trade = get_open_trade(state, position_key)
             trade["stage"] = 3
             # Stop deliberately remains at the TP1 break-even level.
             save_state(state)
@@ -733,18 +754,18 @@ def manage_open_trade(state: Dict[str, Any], side: str, candle: pd.Series) -> No
         tp4_hit = high >= tp4 if side == "LONG" else low <= tp4
 
         if stop_hit:
-            finalize_trade(state, side, stop, "TP3_BE", event_time_ms)
+            finalize_trade(state, position_key, stop, "TP3_BE", event_time_ms)
             return
 
         if tp4_hit:
-            finalize_trade(state, side, tp4, "TP4_HIT", event_time_ms)
+            finalize_trade(state, position_key, tp4, "TP4_HIT", event_time_ms)
             return
 
 
 def manage_open_trades(state: Dict[str, Any], candle: pd.Series) -> None:
-    # Each position is fully independent. Closing one must not affect the other.
-    manage_open_trade(state, "LONG", candle)
-    manage_open_trade(state, "SHORT", candle)
+    # Both LONG positions are fully independent. Closing one must not affect the other.
+    manage_open_trade(state, "open_long_1", candle)
+    manage_open_trade(state, "open_long_2", candle)
 
 # ============================================================================
 # MARKET ANALYSIS
@@ -884,13 +905,14 @@ def market_snapshot() -> Dict[str, Any]:
 
 
 def no_trade_reason(state, direction, confirmation, confirmation_details=None):
-    if direction in {"LONG", "SHORT"} and get_open_trade(state, direction):
-        t = get_open_trade(state, direction)
-        return f"Уже есть открытая сделка {direction} на стадии {t['stage']}"
+    if direction == "SHORT":
+        return "SHORT отключен — бот торгует только LONG"
+    if direction == "LONG" and open_long_count(state) >= 2:
+        return "Уже открыты две LONG-сделки — достигнут лимит 2 одновременных LONG"
     if int(state.get("trades_today", 0)) >= MAX_TRADES_PER_DAY:
         return f"Достигнут дневной лимит {MAX_TRADES_PER_DAY} сделок"
-    if direction in {"LONG", "SHORT"} and is_entry_locked(state, direction):
-        return f"Повторный вход в тот же пробой {direction} запрещён до возврата направления в NONE"
+    if direction == "LONG" and is_entry_locked(state, "LONG"):
+        return "Повторный вход в тот же пробой LONG запрещён до возврата направления в NONE"
     if direction is None:
         return (
             "Нет пробоя Turtle 5: текущая 15M цена находится "
@@ -900,7 +922,8 @@ def no_trade_reason(state, direction, confirmation, confirmation_details=None):
         if confirmation_details:
             return str(confirmation_details.get("reason") or "Нет качественного подтверждения 1M")
         return "Нет качественного подтверждения пробоя закрытой 1M свечой"
-    return "Все условия входа выполнены"
+    return "Все условия входа LONG выполнены"
+
 
 def analyze_market(state: Dict[str, Any]) -> None:
     reset_daily_counter(state)
@@ -910,11 +933,10 @@ def analyze_market(state: Dict[str, Any]) -> None:
     context = snapshot["context"]
     direction = snapshot["direction"]
 
-    # Preserve the old anti-repeat rule: locks are released only after the
-    # Turtle direction returns to NONE. LONG and SHORT locks are independent.
+    # Preserve the old anti-repeat rule: the LONG lock is released only after
+    # the Turtle direction returns to NONE.
     if direction is None:
         state["entry_lock_long"] = False
-        state["entry_lock_short"] = False
 
     one_minute_confirmation = snapshot["confirmation"]
     confirmation_details = snapshot["confirmation_details"]
@@ -993,10 +1015,10 @@ def analyze_market(state: Dict[str, Any]) -> None:
             "-" if confirmation_details["distance_pct"] is None
             else f"{float(confirmation_details['distance_pct']):.3f}%"
         ),
-        open_long=bool(state.get("open_long")),
-        open_short=bool(state.get("open_short")),
+        open_long_1=bool(state.get("open_long_1")),
+        open_long_2=bool(state.get("open_long_2")),
+        open_long_count=open_long_count(state),
         long_lock=bool(state.get("entry_lock_long")),
-        short_lock=bool(state.get("entry_lock_short")),
         trades_today=f"{int(state['trades_today'])}/{MAX_TRADES_PER_DAY}",
         equity=f"{float(state['equity']):.6f} USDT",
     )
@@ -1004,9 +1026,9 @@ def analyze_market(state: Dict[str, Any]) -> None:
     opened_now = False
 
     if (
-        direction in {"LONG", "SHORT"}
-        and not get_open_trade(state, direction)
-        and not is_entry_locked(state, direction)
+        direction == "LONG"
+        and first_free_long_key(state) is not None
+        and not is_entry_locked(state, "LONG")
         and one_minute_confirmation
         and int(state["trades_today"]) < MAX_TRADES_PER_DAY
     ):
@@ -1093,9 +1115,9 @@ def strong_signal(message):
         )
 
         can_open = (
-            direction in {"LONG", "SHORT"}
-            and not get_open_trade(state, direction)
-            and not is_entry_locked(state, direction)
+            direction == "LONG"
+            and first_free_long_key(state) is not None
+            and not is_entry_locked(state, "LONG")
             and confirmation
             and int(state.get("trades_today", 0)) < MAX_TRADES_PER_DAY
         )
@@ -1115,10 +1137,11 @@ def strong_signal(message):
             f"Тело свечи: {float(confirmation_details['body_ratio']) * 100:.1f}% диапазона",
             f"Качество 1M: {confirmation_details['reason']}",
             "",
-            f"LONG открыт: {'ДА' if state.get('open_long') else 'НЕТ'}",
-            f"SHORT открыт: {'ДА' if state.get('open_short') else 'НЕТ'}",
+            f"LONG #1 открыт: {'ДА' if state.get('open_long_1') else 'НЕТ'}",
+            f"LONG #2 открыт: {'ДА' if state.get('open_long_2') else 'НЕТ'}",
+            f"Открыто LONG: {open_long_count(state)}/2",
+            "SHORT: ОТКЛЮЧЕН",
             f"Блокировка LONG: {'ДА' if state.get('entry_lock_long') else 'НЕТ'}",
-            f"Блокировка SHORT: {'ДА' if state.get('entry_lock_short') else 'НЕТ'}",
             f"Сделок сегодня: {int(state.get('trades_today', 0))}/{MAX_TRADES_PER_DAY}",
             f"Капитал: {float(state.get('equity', START_EQUITY_USDT)):.2f} USDT",
             "",
@@ -1155,13 +1178,15 @@ def strong_signal(message):
 @bot.message_handler(commands=["status"])
 def status(message):
     state = load_state()
-    long_trade = state.get("open_long")
-    short_trade = state.get("open_short")
+    long_1 = state.get("open_long_1")
+    long_2 = state.get("open_long_2")
 
     lines = [
         "СОСТОЯНИЕ БОТА",
         "",
         "Бот работает: ДА",
+        "Режим торговли: ТОЛЬКО LONG",
+        "Максимум одновременно: 2 LONG-сделки",
         "Рынок: ETHUSDT Binance Futures",
         "Проверка: каждые 60 секунд",
         f"Последняя проверка: {state.get('last_check_time') or 'ещё не было'}",
@@ -1172,8 +1197,10 @@ def status(message):
         f"Капитал: {float(state.get('equity', START_EQUITY_USDT)):.2f} USDT",
         f"Сделок сегодня: {int(state.get('trades_today', 0))}/{MAX_TRADES_PER_DAY}",
         "",
-        f"LONG открыт: {'ДА' if long_trade else 'НЕТ'}",
-        f"SHORT открыт: {'ДА' if short_trade else 'НЕТ'}",
+        f"LONG #1 открыт: {'ДА' if long_1 else 'НЕТ'}",
+        f"LONG #2 открыт: {'ДА' if long_2 else 'НЕТ'}",
+        f"Открыто LONG: {open_long_count(state)}/2",
+        "SHORT: ОТКЛЮЧЕН",
     ]
 
     stage_names = {
@@ -1183,7 +1210,7 @@ def status(message):
         3: "TP3 выполнен, осталось 20%",
     }
 
-    for label, trade in (("LONG", long_trade), ("SHORT", short_trade)):
+    for label, trade in (("LONG #1", long_1), ("LONG #2", long_2)):
         if not trade:
             continue
         lines.extend([
@@ -1250,9 +1277,10 @@ def startup_self_check() -> None:
             TP3_CLOSE_FRACTION,
             TP4_CLOSE_FRACTION,
         ) == (0.20, 0.30, 0.30, 0.20),
-        "dual_position_state": (
-            "open_long" in default_state()
-            and "open_short" in default_state()
+        "long_only_two_position_state": (
+            "open_long_1" in default_state()
+            and "open_long_2" in default_state()
+            and "open_short" not in default_state()
             and "open_trade" not in default_state()
         ),
         "paper_mode": LIVE_TRADING_ENABLED is False,
@@ -1284,7 +1312,7 @@ if __name__ == "__main__":
         symbol=SYMBOL,
         market="Binance Futures",
         check_interval="Every 60 seconds",
-        strategy="Turtle 5 Strategy 3 | one LONG + one SHORT independently",
+        strategy="Turtle 5 Strategy 3 | LONG ONLY | up to two LONG positions independently",
         margin=f"{POSITION_MARGIN_PCT}% of current equity",
         leverage=f"{LEVERAGE}x",
         stop=f"{INITIAL_STOP_PCT}%",
